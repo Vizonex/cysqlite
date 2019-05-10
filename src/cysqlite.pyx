@@ -10,7 +10,8 @@ from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.unicode cimport PyUnicode_Check
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 
-include "sqlite.pxi"
+include "./sqlite.pxi"
+include "./buf.pyx"
 
 
 cdef inline str decode(key):
