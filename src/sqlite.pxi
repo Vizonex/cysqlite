@@ -21,12 +21,27 @@ cdef struct sqlite3_index_constraint_usage:
 cdef extern from "sqlite3.h" nogil:
     ctypedef struct sqlite3:
         int busyTimeout
+
     ctypedef struct sqlite3_backup
     ctypedef struct sqlite3_blob
     ctypedef struct sqlite3_context
     ctypedef struct sqlite3_value
     ctypedef long long sqlite3_int64
     ctypedef unsigned long long sqlite_uint64
+
+    cdef int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags,
+                             const char *zVfs)
+    cdef int sqlite3_close_v2(sqlite3 *)
+
+    # On error, returns SQLITE_ABORT. Otherwise the callback will be called
+    # with the number of columns in the result, array of pointers to strings
+    # obtained as if via sqlite3_column_text(), followed by the column names.
+    cdef int sqlite3_exec(
+        sqlite3 *,
+        const char *sql,  # Sql to evaluate.
+        int(*callback)(void *, int, char **, char **),
+        void *,  # First argument to callback.
+        char **errmsg)
 
     # Virtual tables.
     ctypedef struct sqlite3_module  # Forward reference.
@@ -104,7 +119,37 @@ cdef extern from "sqlite3.h" nogil:
     cdef int SQLITE_NOMEM
     cdef int SQLITE_READONLY
     cdef int SQLITE_INTERRUPT
+    cdef int SQLITE_CORRUPT
+    cdef int SQLITE_NOTFOUND
+    cdef int SQLITE_FULL
+    cdef int SQLITE_CANTOPEN
+    cdef int SQLITE_PROTOCOL
+    cdef int SQLITE_EMPTY
+    cdef int SQLITE_SCHEMA
+    cdef int SQLITE_TOOBIG
+    cdef int SQLITE_CONSTRAINT
+    cdef int SQLITE_MISMATCH
+    cdef int SQLITE_MISUSE
+    cdef int SQLITE_NOLFS
+    cdef int SQLITE_AUTH
+    cdef int SQLITE_FORMAT
+    cdef int SQLITE_RANGE
+    cdef int SQLITE_NOTADB
+    cdef int SQLITE_NOTICE
+    cdef int SQLITE_WARNING
+    cdef int SQLITE_ROW
     cdef int SQLITE_DONE
+
+    # Options for open.
+    cdef int SQLITE_OPEN_READONLY
+    cdef int SQLITE_OPEN_READWRITE
+    cdef int SQLITE_OPEN_CREATE
+    cdef int SQLITE_OPEN_URI
+    cdef int SQLITE_OPEN_MEMORY
+    cdef int SQLITE_OPEN_NOMUTEX
+    cdef int SQLITE_OPEN_FULLMUTEX
+    cdef int SQLITE_OPEN_SHAREDCACHE
+    cdef int SQLITE_OPEN_PRIVATECACHE
 
     # Function type.
     cdef int SQLITE_DETERMINISTIC
@@ -196,9 +241,39 @@ cdef extern from "sqlite3.h" nogil:
     #cdef int SQLITE_DBSTATUS_CACHE_USED_SHARED = 11
     cdef int sqlite3_db_status(sqlite3 *, int op, int *pCur, int *pHigh, int reset)
 
-    cdef int SQLITE_DELETE = 9
-    cdef int SQLITE_INSERT = 18
-    cdef int SQLITE_UPDATE = 23
+    cdef int SQLITE_CREATE_INDEX
+    cdef int SQLITE_CREATE_TABLE
+    cdef int SQLITE_CREATE_TEMP_INDEX
+    cdef int SQLITE_CREATE_TEMP_TABLE
+    cdef int SQLITE_CREATE_TEMP_TRIGGER
+    cdef int SQLITE_CREATE_TEMP_VIEW
+    cdef int SQLITE_CREATE_TRIGGER
+    cdef int SQLITE_CREATE_VIEW
+    cdef int SQLITE_DELETE
+    cdef int SQLITE_DROP_INDEX
+    cdef int SQLITE_DROP_TABLE
+    cdef int SQLITE_DROP_TEMP_INDEX
+    cdef int SQLITE_DROP_TEMP_TABLE
+    cdef int SQLITE_DROP_TEMP_TRIGGER
+    cdef int SQLITE_DROP_TEMP_VIEW
+    cdef int SQLITE_DROP_TRIGGER
+    cdef int SQLITE_DROP_VIEW
+    cdef int SQLITE_INSERT
+    cdef int SQLITE_PRAGMA
+    cdef int SQLITE_READ
+    cdef int SQLITE_SELECT
+    cdef int SQLITE_TRANSACTION
+    cdef int SQLITE_UPDATE
+    cdef int SQLITE_ATTACH
+    cdef int SQLITE_DETACH
+    cdef int SQLITE_ALTER_TABLE
+    cdef int SQLITE_REINDEX
+    cdef int SQLITE_ANALYZE
+    cdef int SQLITE_CREATE_VTABLE
+    cdef int SQLITE_DROP_VTABLE
+    cdef int SQLITE_FUNCTION
+    cdef int SQLITE_SAVEPOINT
+    cdef int SQLITE_RECURSIVE
 
     cdef int SQLITE_CONFIG_SINGLETHREAD = 1  # None
     cdef int SQLITE_CONFIG_MULTITHREAD = 2  # None
@@ -211,6 +286,7 @@ cdef extern from "sqlite3.h" nogil:
     cdef int SQLITE_CONFIG_URI = 17  # int
     cdef int SQLITE_CONFIG_MMAP_SIZE = 22  # sqlite3_int64, sqlite3_int64
     cdef int SQLITE_CONFIG_STMTJRNL_SPILL = 26  # int nByte
+
     cdef int SQLITE_DBCONFIG_MAINDBNAME = 1000  # const char*
     cdef int SQLITE_DBCONFIG_LOOKASIDE = 1001  # void* int int
     cdef int SQLITE_DBCONFIG_ENABLE_FKEY = 1002  # int int*
@@ -224,6 +300,7 @@ cdef extern from "sqlite3.h" nogil:
     cdef int sqlite3_db_config(sqlite3*, int op, ...)
 
     # Misc.
+    cdef int sqlite3_busy_timeout(sqlite3*, int ms)
     cdef int sqlite3_busy_handler(sqlite3 *db, int(*)(void *, int), void *)
     cdef int sqlite3_sleep(int ms)
     cdef sqlite3_backup *sqlite3_backup_init(

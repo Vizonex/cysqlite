@@ -3,3 +3,4 @@ src/*.c
 *.so
 z.py
 build/
+.eggs/
