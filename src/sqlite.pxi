@@ -25,6 +25,7 @@ cdef extern from "sqlite3.h" nogil:
     ctypedef struct sqlite3_backup
     ctypedef struct sqlite3_blob
     ctypedef struct sqlite3_context
+    ctypedef struct sqlite3_stmt
     ctypedef struct sqlite3_value
     ctypedef long long sqlite3_int64
     ctypedef unsigned long long sqlite_uint64
@@ -42,6 +43,45 @@ cdef extern from "sqlite3.h" nogil:
         int(*callback)(void *, int, char **, char **),
         void *,  # First argument to callback.
         char **errmsg)
+
+    # Prepared statements.
+    cdef int sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nBytes,
+                                sqlite3_stmt **ppStmt, const char **pzTail)
+    cdef int sqlite3_stmt_readonly(sqlite3_stmt *pStmt)
+    cdef int sqlite3_stmt_isexplain(sqlite3_stmt *pStmt)
+    cdef int sqlite3_stmt_busy(sqlite3_stmt *pStmt)
+
+    cdef int sqlite3_bind_blob64(sqlite3_stmt *, int, const void *,
+                                 sqlite3_uint64, void(*)(void *))
+    cdef int sqlite3_bind_double(sqlite3_stmt *, int, double)
+    cdef int sqlite3_bind_int64(sqlite3_stmt *, int, sqlite3_int64)
+    cdef int sqlite3_bind_null(sqlite3_stmt *, int)
+    cdef int sqlite3_bind_test64(sqlite3_stmt *, int, const char *,
+                                 sqlite3_uint64, void(*)(void *),
+                                 unsigned char encoding)
+    cdef int sqlite3_bind_value(sqlite3_stmt *, int, const sqlite3_value *)
+    cdef int sqlite3_bind_zeroblob64(sqlite3_stmt *, int, sqlite3_uint64)
+    cdef int sqlite3_bind_parameter_count(sqlite3_stmt *)
+    cdef const char *sqlite3_bind_parameter_name(sqlite3_stmt*, int)
+    cdef int sqlite3_bind_parameter_index(sqlite3_stmt*, const char *zName)
+    cdef int sqlite3_clear_bindings(sqlite3_stmt*)
+    cdef int sqlite3_column_count(sqlite3_stmt *pStmt)
+    cdef const char *sqlite3_column_name(sqlite3_stmt*, int N)
+    cdef const char *sqlite3_column_database_name(sqlite3_stmt*, int N)
+    cdef const char *sqlite3_column_table_name(sqlite3_stmt*, int N)
+    cdef const char *sqlite3_column_origin_name(sqlite3_stmt*, int N)
+    cdef const char *sqlite3_column_decltype(sqlite3_stmt*, int)
+    cdef int sqlite3_step(sqlite3_stmt*)
+    cdef int sqlite3_data_count(sqlite3_stmt *pStmt)
+    cdef int sqlite3_finalize(sqlite3_stmt *pStmt)
+
+    cdef const void *sqlite3_column_blob(sqlite3_stmt*, int iCol)
+    cdef double sqlite3_column_double(sqlite3_stmt*, int iCol)
+    cdef sqlite3_int64 sqlite3_column_int64(sqlite3_stmt*, int iCol)
+    cdef const unsigned char *sqlite3_column_text(sqlite3_stmt*, int iCol)
+    cdef sqlite3_value *sqlite3_column_value(sqlite3_stmt*, int iCol)
+    cdef int sqlite3_column_bytes(sqlite3_stmt*, int iCol)
+    cdef int sqlite3_column_type(sqlite3_stmt*, int iCol)
 
     # Virtual tables.
     ctypedef struct sqlite3_module  # Forward reference.

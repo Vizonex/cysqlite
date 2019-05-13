@@ -1,4 +1,4 @@
-# cython: language_level=2
+# cython: language_level=3
 from cpython.bytes cimport PyBytes_AsString
 from cpython.bytes cimport PyBytes_Check
 from cpython.bytes cimport PyBytes_FromStringAndSize
@@ -12,6 +12,7 @@ from cpython.unicode cimport PyUnicode_Check
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 
 from collections import namedtuple
+import traceback
 
 include "./sqlite.pxi"
 
@@ -60,7 +61,7 @@ cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) with
     try:
         callback(row)
     except Exception as exc:
-        print('error in callback!')
+        traceback.print_exc()
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -132,5 +133,11 @@ cdef class Connection(object):
         finally:
             if callback is not None:
                 Py_DECREF(callback)
+
+        if rc != SQLITE_OK:
+            error = 'error executing query: %s' % rc
+            if errmsg:
+                error = '%s - %s' % (error, errmsg)
+            raise Exception(error)
 
         return rc
