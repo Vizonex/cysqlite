@@ -28,7 +28,7 @@ cdef extern from "sqlite3.h" nogil:
     ctypedef struct sqlite3_stmt
     ctypedef struct sqlite3_value
     ctypedef long long sqlite3_int64
-    ctypedef unsigned long long sqlite_uint64
+    ctypedef unsigned long long sqlite3_uint64
 
     cdef int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags,
                              const char *zVfs)

@@ -10,7 +10,7 @@ conn.execute('create table if not exists "kv" ('
              '"value" text not null)')
 
 st = Statement(conn, 'insert into kv (key, value) values (?,?),(?,?),(?,?)',
-               ('k1', 'v1', 'k2', 'v2', 'k3', 'v3'))
+               ('k1', 'v1x', 'k2', 'v2yy', 'k3', 'v3'))
 print(st.execute())
 
 def cb(row):

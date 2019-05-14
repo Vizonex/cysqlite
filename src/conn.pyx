@@ -167,8 +167,10 @@ cdef class Statement(object):
             Py_ssize_t nbytes
 
         PyBytes_AsStringAndSize(self.sql, &zsql, &nbytes)
-        rc = sqlite3_prepare_v2(self.conn.db, zsql, <int>nbytes, &(self.st),
-                                &tail)
+        with nogil:
+            rc = sqlite3_prepare_v2(self.conn.db, zsql, <int>nbytes,
+                                    &(self.st), &tail)
+
         if rc != SQLITE_OK:
             raise Exception('error compiling statement')
 
@@ -186,20 +188,22 @@ cdef class Statement(object):
             elif isinstance(param, unicode):
                 tmp = PyUnicode_AsUTF8String(param)
                 PyBytes_AsStringAndSize(tmp, &buf, &nbytes)
-                rc = sqlite3_bind_text64(self.st, i + 1, buf, <int>nbytes,
+                rc = sqlite3_bind_text64(self.st, i + 1, buf, <sqlite3_uint64>nbytes,
                                          <sqlite3_destructor_type>-1,
                                          SQLITE_UTF8)
             elif isinstance(param, bytes):
                 PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
                 rc = sqlite3_bind_blob64(self.st, i + 1, <void *>buf,
-                                         <int>nbytes,
+                                         <sqlite3_uint64>nbytes,
                                          <sqlite3_destructor_type>-1)
 
             if rc != SQLITE_OK:
                 raise Exception('error binding parameter "%r" - %s' %
                                 (param, rc))
 
-        rc = sqlite3_step(self.st)
+        with nogil:
+            rc = sqlite3_step(self.st)
+
         return self._get_next_row()
         # rc = SQLITE_ROW? SQLITE_DONE?
         if rc != SQLITE_OK:
