@@ -172,26 +172,32 @@ cdef class Statement(object):
         if rc != SQLITE_OK:
             raise Exception('error compiling statement')
 
+        pc = sqlite3_bind_parameter_count(self.st)
+        if pc != len(self.params):
+            raise Exception('error %s parameters required' % pc)
+
         for i, param in enumerate(self.params):
             if param is None:
-                rc = sqlite3_bind_null(self.st, i)
+                rc = sqlite3_bind_null(self.st, i + 1)
             elif isinstance(param, int):
-                rc = sqlite3_bind_int64(self.st, i, param)
+                rc = sqlite3_bind_int64(self.st, i + 1, param)
             elif isinstance(param, float):
-                rc = sqlite3_bind_double(self.st, i, param)
+                rc = sqlite3_bind_double(self.st, i + 1, param)
             elif isinstance(param, unicode):
                 tmp = PyUnicode_AsUTF8String(param)
                 PyBytes_AsStringAndSize(tmp, &buf, &nbytes)
-                rc = sqlite3_bind_text64(self.st, i, buf, <int>nbytes,
+                rc = sqlite3_bind_text64(self.st, i + 1, buf, <int>nbytes,
                                          <sqlite3_destructor_type>-1,
                                          SQLITE_UTF8)
             elif isinstance(param, bytes):
                 PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
-                rc = sqlite3_bind_blob64(self.st, i, <void *>buf, <int>nbytes,
+                rc = sqlite3_bind_blob64(self.st, i + 1, <void *>buf,
+                                         <int>nbytes,
                                          <sqlite3_destructor_type>-1)
 
             if rc != SQLITE_OK:
-                raise Exception('error binding parameter "%r"' % param)
+                raise Exception('error binding parameter "%r" - %s' %
+                                (param, rc))
 
         rc = sqlite3_step(self.st)
         return self._get_next_row()
