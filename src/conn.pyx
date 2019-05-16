@@ -15,7 +15,7 @@ from cpython.unicode cimport PyUnicode_DecodeUTF8
 from collections import namedtuple
 import traceback
 
-include "./sqlite.pxi"
+include "./sqlite3.pxi"
 
 
 cdef inline unicode decode(key):
