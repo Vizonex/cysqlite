@@ -15,7 +15,11 @@ r = conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
 print(r)
 print(conn.last_insert_rowid())
 
-curs = conn.execute('select * from kv order by key desc')
+curs = conn.execute('select * from kv where key > ? order by key desc', ('k1',))
+for row in curs:
+    print(row)
+
+curs = conn.execute('select * from kv where key > ? order by key desc', ('k2',))
 for row in curs:
     print(row)
 

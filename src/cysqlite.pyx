@@ -39,6 +39,7 @@ cdef raise_sqlite_error(sqlite3 *db):
 cdef class Connection(object):
     cdef:
         sqlite3 *db
+        public int cached_statements
         public int flags
         public int timeout
         public str database
@@ -50,11 +51,13 @@ cdef class Connection(object):
         dict stmt_available  # sql -> Statement.
         dict stmt_in_use  # id(stmt) -> Statement.
 
-    def __init__(self, database, flags=None, timeout=5000, vfs=None):
+    def __init__(self, database, flags=None, timeout=5000, vfs=None,
+                 cached_statements=100):
         self.database = database
         self.flags = flags or 0
         self.timeout = timeout
         self.vfs = vfs
+        self.cached_statements = cached_statements
         self.db = NULL
         self.stmt_available = {}
         self.stmt_in_use = {}
@@ -111,12 +114,14 @@ cdef class Connection(object):
         return st
 
     cdef Statement stmt_get(self, sql):
-        cdef Statement st
+        cdef:
+            bytes bsql = encode(sql)
+            Statement st
 
-        if sql in self.stmt_available:
-            st = self.stmt_available.pop(sql)
+        if bsql in self.stmt_available:
+            st = self.stmt_available.pop(bsql)
         else:
-            st = Statement(self, sql)
+            st = Statement(self, bsql)
 
         self.stmt_in_use[id(st)] = st
         return st
@@ -125,6 +130,10 @@ cdef class Connection(object):
         if id(st) in self.stmt_in_use:
             del self.stmt_in_use[id(st)]
         self.stmt_available[st.sql] = st
+
+        # Randomly remove a statement from the cache.
+        if len(self.stmt_available) > self.cached_statements:
+            self.stmt_available.popitem()
 
     def execute(self, sql, params=None):
         st = self.prepare(sql, params or ())
