@@ -15,9 +15,25 @@ r = conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
 print(r)
 print(conn.last_insert_rowid())
 
+print('-' * 70)
+
 curs = conn.execute('select * from kv where key > ? order by key desc', ('k1',))
 for row in curs:
     print(row)
+
+with conn.atomic() as txn:
+    conn.execute('insert into kv (key, value) values (?, ?)', ('k4', 'v4a'))
+    txn.rollback()
+
+with conn.atomic() as txn:
+    with conn.atomic() as sp:
+        conn.execute('insert into kv (key, value) values (?, ?)', ('k5', 'v5'))
+    with conn.atomic() as sp:
+        conn.execute('insert into kv (key, value) values (?, ?)', ('k5', 'v5'))
+        sp.rollback()
+    conn.execute('insert into kv (key, value) values (?, ?)', ('k7', 'v7'))
+
+print('-' * 70)
 
 curs = conn.execute('select * from kv where key > ? order by key desc', ('k2',))
 for row in curs:
@@ -25,6 +41,8 @@ for row in curs:
 
 conn.execute_simple('drop table kv')
 conn.close()
+
+print('-' * 70)
 
 conn.connect()
 conn.execute('create table foo (id integer not null primary key, key text)')

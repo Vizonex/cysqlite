@@ -63,7 +63,7 @@ cdef class Connection(_callable_context_manager):
 
     def __init__(self, database, flags=None, timeout=5000, vfs=None,
                  cached_statements=100):
-        self.database = database
+        self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
         self.vfs = vfs
