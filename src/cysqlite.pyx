@@ -187,6 +187,13 @@ cdef class Connection(_callable_context_manager):
     def last_insert_rowid(self):
         return sqlite3_last_insert_rowid(self.db)
 
+    def status(self, flag):
+        cdef int current, highwater, rc
+
+        if sqlite3_db_status(self.db, flag, &current, &highwater, 0):
+            raise_sqlite_error(self.db, 'error requesting db status: ')
+        return (current, highwater)
+
     def transaction(self, lock=None):
         return Transaction(self, lock)
 
@@ -205,6 +212,56 @@ cdef class Connection(_callable_context_manager):
 
     def rollback(self):
         self.execute(b'ROLLBACK')
+
+    def backup(self, Connection dest, pages=None, name=None, progress=None,
+               src_name=None):
+        cdef:
+            bytes bname = encode(name or 'main')
+            bytes bsrcname = encode(src_name or 'main')
+            int page_step = pages or -1
+            int rc = 0
+            sqlite3_backup *backup
+
+        if not self.db or not dest.db:
+            raise SqliteError('source or destination database is closed')
+
+        backup = sqlite3_backup_init(dest.db, bname, self.db, bsrcname)
+        if backup == NULL:
+            raise_sqlite_error(dest.db, 'error initializing backup: ')
+
+        while True:
+            with nogil:
+                rc = sqlite3_backup_step(backup, page_step)
+
+            if progress is not None:
+                remaining = sqlite3_backup_remaining(backup)
+                page_count = sqlite3_backup_pagecount(backup)
+                try:
+                    progress(remaining, page_count, rc == SQLITE_DONE)
+                except:
+                    sqlite3_backup_finish(backup)
+                    raise
+
+            if rc == SQLITE_BUSY or rc == SQLITE_LOCKED:
+                with nogil:
+                    sqlite3_sleep(250)
+            elif rc == SQLITE_DONE:
+                break
+            else:
+                sqlite3_backup_finish(backup)
+                raise_sqlite_error(dest.db, 'error backing up database: ')
+
+        with nogil:
+            rc = sqlite3_backup_finish(backup)
+
+        if rc != SQLITE_OK:
+            raise_sqlite_error(dest.db, 'error backing up database: ')
+
+    def backup_to_file(self, filename, pages=None, name=None, progress=None,
+                       src_name=None):
+        cdef Connection dest = Connection(filename)
+        self.backup(dest, pages, name, progress, src_name)
+        dest.close()
 
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) with gil:
@@ -474,3 +531,12 @@ cdef class Statement(object):
             PyTuple_SET_ITEM(result, i, value)
 
         return result
+
+
+def status(flag):
+    cdef int current, highwater, rc
+
+    rc = sqlite3_status(flag, &current, &highwater, 0)
+    if rc != SQLITE_OK:
+        raise SqliteError('error requesting status: %s' % rc)
+    return (current, highwater)
