@@ -51,6 +51,26 @@ conn.execute('insert into foo (key) values (?), (?), (?), (?)',
 for row in conn.execute('select * from foo'):
     print(row[0], '->', row[1])
 
+try:
+    conn.execute('select * from zoo;')
+except Exception as exc:
+    print(exc)
+
 conn.execute('delete from foo where id < ?', (3,))
 print(conn.changes())
+
+conn.close()
+
+# Test statement cache.
+conn = Connection(':memory:', cached_statements=2)
+conn.connect()
+
+conn.execute('create table foo (key text, value text)')
+with conn.atomic():
+    for k, v in zip('abcdefg', 'hijklmno'):
+        conn.execute('INSERT INTO foo (key, value) VALUES (?, ?)', (k, v))
+
+    list(conn.execute('select * from foo'))
+    list(conn.execute('select * from foo'))
+
 conn.close()

@@ -32,9 +32,10 @@ cdef class Savepoint(object)
 #cdef class Backup(object)
 
 
-cdef raise_sqlite_error(sqlite3 *db):
+cdef raise_sqlite_error(sqlite3 *db, unicode msg):
+    msg = msg or ''
     errmsg = sqlite3_errmsg(db)
-    raise SqliteError(decode(errmsg))
+    raise SqliteError(msg + decode(errmsg))
 
 
 cdef class _callable_context_manager(object):
@@ -87,7 +88,7 @@ cdef class Connection(_callable_context_manager):
 
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
-            raise Exception('error closing database: %s' % rc)
+            raise SqliteError('error closing database: %s' % rc)
         self.db = NULL
         return True
 
@@ -108,12 +109,11 @@ cdef class Connection(_callable_context_manager):
         rc = sqlite3_open_v2(zdatabase, &self.db, flags, zvfs)
         if rc != SQLITE_OK:
             self.db = NULL
-            raise Exception('failed to connect: %s.' % rc)
+            raise SqliteError('error opening database: %s.' % rc)
 
         rc = sqlite3_busy_timeout(self.db, self.timeout)
         if rc != SQLITE_OK:
-            self.close()
-            raise Exception('error setting busy timeout.')
+            raise_sqlite_error(self.db, 'error setting busy timeout: ')
 
         return True
 
@@ -127,7 +127,8 @@ cdef class Connection(_callable_context_manager):
 
     cdef Statement prepare(self, sql, params=None):
         cdef Statement st = self.stmt_get(sql)
-        st.bind(params)
+        if params:
+            st.bind(params)
         return st
 
     cdef Statement stmt_get(self, sql):
@@ -148,9 +149,12 @@ cdef class Connection(_callable_context_manager):
             del self.stmt_in_use[id(st)]
         self.stmt_available[st.sql] = st
 
-        # Randomly remove a statement from the cache.
-        if len(self.stmt_available) > self.cached_statements:
-            self.stmt_available.popitem()
+        # Remove oldest statement from the cache - relies on Python 3.6
+        # dictionary retaining insertion order. For older python, will simply
+        # remove a random key, which is also fine.
+        while len(self.stmt_available) > self.cached_statements:
+            first_key = next(iter(self.stmt_available))
+            self.stmt_available.pop(first_key)
 
     def execute(self, sql, params=None):
         st = self.prepare(sql, params or ())
@@ -175,9 +179,7 @@ cdef class Connection(_callable_context_manager):
                 Py_DECREF(callback)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db)
-
-        return rc
+            raise_sqlite_error(self.db, 'error executing query: ')
 
     def changes(self):
         return sqlite3_changes(self.db)
@@ -361,22 +363,23 @@ cdef class Statement(object):
                                     &(self.st), NULL)
 
         if rc != SQLITE_OK:
-            print('rc=%s' % rc)
-            raise_sqlite_error(self.conn.db)
+            raise_sqlite_error(self.conn.db, 'error compiling statement: ')
 
-    cdef bind(self, params):
+    cdef bind(self, tuple params):
         cdef:
             bytes tmp
             char *buf
-            int i, rc = 0
+            int i = 1, rc = 0
             Py_ssize_t nbytes
 
         pc = sqlite3_bind_parameter_count(self.st)
         if pc != len(params):
             raise SqliteError('error: %s parameters required' % pc)
 
-        for i, param in enumerate(params):
-            # Note: sqlite3_bind_XXX uses 1-based indexes.
+        # Note: sqlite3_bind_XXX uses 1-based indexes.
+        for i in range(pc):
+            param = params[i]
+
             if param is None:
                 rc = sqlite3_bind_null(self.st, i + 1)
             elif isinstance(param, int):
@@ -397,20 +400,23 @@ cdef class Statement(object):
                                          <sqlite3_destructor_type>-1)
 
             if rc != SQLITE_OK:
-                raise_sqlite_error(self.conn.db)
+                raise_sqlite_error(self.conn.db, 'error binding parameter: ')
 
-    cdef int reset(self):
+    cdef reset(self):
         if self.st == NULL:
             return 0
         self.step_status = -1
         self.conn.stmt_release(self)
-        return sqlite3_reset(self.st)
+        if sqlite3_reset(self.st) != SQLITE_OK:
+            raise_sqlite_error(self.conn.db, 'error resetting statement: ')
 
     def __iter__(self):
         return self
 
     def __next__(self):
         row = None
+
+        # Perform the first call to sqlite3_step.
         if self.step_status == -1:
             self.step_status = sqlite3_step(self.st)
 
@@ -421,7 +427,7 @@ cdef class Statement(object):
             self.reset()
             raise StopIteration
         else:
-            raise_sqlite_error(self.conn.db)
+            raise_sqlite_error(self.conn.db, 'error executing query: ')
         return row
 
     def execute(self):
@@ -434,7 +440,7 @@ cdef class Statement(object):
         elif self.step_status == SQLITE_ROW:
             return self
         else:
-            raise_sqlite_error(self.conn.db)
+            raise_sqlite_error(self.conn.db, 'error executing query: ')
 
     cdef get_row_data(self):
         cdef:
@@ -463,7 +469,7 @@ cdef class Statement(object):
                     nbytes)
                 Py_INCREF(value)
             else:
-                assert False, 'should not get here!'
+                raise SqliteError('error: cannot bind parameter %r' % value)
 
             PyTuple_SET_ITEM(result, i, value)
 
