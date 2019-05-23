@@ -292,21 +292,62 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error creating function: ')
 
+    def create_aggregate(self, agg, name=None, nargs=-1, deterministic=True):
+        cdef:
+            _Callback callback
+            bytes bname = encode(name or agg.__name__)
+            int flags = SQLITE_UTF8
+            int rc
 
-cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) with gil:
-    cdef:
-        _Callback cb = <_Callback>sqlite3_user_data(ctx)
-        int i
-        tuple params
+        if deterministic:
+            flags |= SQLITE_DETERMINISTIC
 
-    params = sqlite_to_python(argc, argv)
-    try:
-        result = cb.fn(*params)
-    except Exception as exc:
-        traceback.print_exc()
-        sqlite3_result_error(ctx, b'error in user-defined function', -1)
-    else:
-        python_to_sqlite(ctx, result)
+        # Store reference to user-defined function.
+        callback = _Callback.__new__(_Callback, self, agg)
+        self.functions[name] = callback
+
+        rc = sqlite3_create_function(
+            self.db,
+            bname,
+            <int>nargs,
+            flags,
+            <void *>callback,
+            NULL,
+            _step_cb,
+            _finalize_cb)
+
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error creating aggregate: ')
+
+    def create_window_function(self, agg, name=None, nargs=-1,
+                               deterministic=True):
+        cdef:
+            _Callback callback
+            bytes bname = encode(name or agg.__name__)
+            int flags = SQLITE_UTF8
+            int rc
+
+        if deterministic:
+            flags |= SQLITE_DETERMINISTIC
+
+        # Store reference to user-defined function.
+        callback = _Callback.__new__(_Callback, self, agg)
+        self.functions[name] = callback
+
+        rc = sqlite3_create_window_function(
+            self.db,
+            <const char *>bname,
+            nargs,
+            flags,
+            <void *>callback,
+            _step_cb,
+            _finalize_cb,
+            _value_cb,
+            _inverse_cb,
+            NULL)
+
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error creating aggregate: ')
 
 
 cdef class _Callback(object):
@@ -317,6 +358,99 @@ cdef class _Callback(object):
     def __cinit__(self, Connection conn, fn):
         self.conn = conn
         self.fn = fn
+
+
+cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) with gil:
+    cdef:
+        _Callback cb = <_Callback>sqlite3_user_data(ctx)
+        tuple params = sqlite_to_python(argc, argv)
+
+    try:
+        result = cb.fn(*params)
+    except Exception as exc:
+        # XXX: report error back to conn.
+        traceback.print_exc()
+        sqlite3_result_error(ctx, b'error in user-defined function', -1)
+    else:
+        python_to_sqlite(ctx, result)
+
+
+cdef void _step_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) with gil:
+    cdef:
+        _Callback cb = <_Callback>sqlite3_user_data(ctx)
+        PyObject **obj_pp
+        tuple params
+
+    # Get the aggregate instance, creating it if this is the first call.
+    obj_pp = <PyObject **>sqlite3_aggregate_context(ctx, sizeof(PyObject *))
+    if obj_pp[0] == NULL:
+        try:
+            agg = cb.fn()
+        except Exception as exc:
+            # XXX: report error back to conn.
+            traceback.print_exc()
+            sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
+            return
+
+        obj_pp[0] = <PyObject *>agg
+        Py_INCREF(agg)
+    else:
+        agg = <object>(obj_pp[0])
+
+    params = sqlite_to_python(argc, argv)
+    try:
+        result = agg.step(*params)
+    except Exception as exc:
+        # XXX: report error back to conn.
+        traceback.print_exc()
+        sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
+
+
+cdef void _finalize_cb(sqlite3_context *ctx) with gil:
+    cdef PyObject **obj_pp
+
+    obj_pp = <PyObject **>sqlite3_aggregate_context(ctx, sizeof(PyObject *))
+    agg = <object>(obj_pp[0])
+
+    try:
+        result = agg.finalize()
+    except Exception as exc:
+        # XXX: report error back to conn.
+        traceback.print_exc()
+        sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
+    else:
+        python_to_sqlite(ctx, result)
+
+    Py_DECREF(agg)
+
+
+cdef void _value_cb(sqlite3_context *ctx) with gil:
+    cdef PyObject **obj_pp
+
+    obj_pp = <PyObject **>sqlite3_aggregate_context(ctx, sizeof(PyObject *))
+    agg = <object>(obj_pp[0])
+    try:
+        result = agg.value()
+    except Exception as exc:
+        # XXX: report error back to conn.
+        traceback.print_exc()
+        sqlite3_result_error(ctx, b'error in user-defined window function', -1)
+    else:
+        python_to_sqlite(ctx, result)
+
+
+cdef void _inverse_cb(sqlite3_context *ctx, int argc, sqlite3_value **params) with gil:
+    cdef PyObject **obj_pp
+
+    obj_pp = <PyObject **>sqlite3_aggregate_context(ctx, sizeof(PyObject *))
+    agg = <object>(obj_pp[0])
+
+    try:
+        agg.inverse(*sqlite_to_python(argc, params))
+    except Exception as exc:
+        # XXX: report error back to conn.
+        traceback.print_exc()
+        sqlite3_result_error(ctx, b'error in user-defined window function', -1)
 
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) with gil:

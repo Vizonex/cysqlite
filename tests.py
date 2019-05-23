@@ -125,7 +125,37 @@ def my_func(s):
         return
     return s[::-1].title()
 
+class MySum(object):
+    def __init__(self): self.ct = 0
+    def step(self, n): self.ct += n
+    def inverse(self, n): self.ct -= n
+    def value(self): return self.ct
+    def finalize(self): return self.ct
+
 conn.create_function(my_func)
+conn.create_aggregate(MySum, 'mysum', 1)
+conn.create_window_function(MySum, 'mysumw', 1)
+
 for row in conn.execute('select key, my_func(key), my_func(value) from kv'):
     print(row)
+
+conn.execute('create table sample (id integer not null primary key, '
+             'category text, value int)')
+data = (
+    ('a', 10),
+    ('a', 20),
+    ('b', 1),
+    ('b', 2),
+    ('c', 100))
+for cat_val in data:
+    conn.execute('insert into sample (category, value) values (?, ?)', cat_val)
+
+#agg_sql = 'select category, mysum(value) from sample group by category'
+#for row in conn.execute(agg_sql):
+#    print(row)
+w_sql = ('select category, mysumw(value) over (partition by category) '
+         'from sample')
+for row in conn.execute(w_sql):
+    print(row)
+
 conn.close()
