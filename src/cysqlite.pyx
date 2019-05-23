@@ -708,16 +708,15 @@ cdef class Statement(object):
                     <char *>sqlite3_column_text(self.st, i),
                     nbytes,
                     "replace")
-                Py_INCREF(value)
             elif coltype == SQLITE_BLOB:
                 nbytes = sqlite3_column_bytes(self.st, i)
                 value = PyBytes_FromStringAndSize(
                     <char *>sqlite3_column_blob(self.st, i),
                     nbytes)
-                Py_INCREF(value)
             else:
                 raise SqliteError('error: cannot bind parameter %r' % value)
 
+            Py_INCREF(value)
             PyTuple_SET_ITEM(result, i, value)
 
         return result
@@ -886,17 +885,16 @@ cdef tuple sqlite_to_python(int argc, sqlite3_value **params):
             pyval = PyUnicode_DecodeUTF8(
                 <const char *>sqlite3_value_text(params[i]),
                 <Py_ssize_t>sqlite3_value_bytes(params[i]), NULL)
-            Py_INCREF(pyval)
         elif vtype == SQLITE_BLOB:
             pyval = PyBytes_FromStringAndSize(
                 <const char *>sqlite3_value_blob(params[i]),
                 <Py_ssize_t>sqlite3_value_bytes(params[i]))
-            Py_INCREF(pyval)
         elif vtype == SQLITE_NULL:
             pyval = None
         else:
             pyval = None
 
+        Py_INCREF(pyval)
         PyTuple_SET_ITEM(result, i, pyval)
 
     return result
