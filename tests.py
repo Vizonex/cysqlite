@@ -2,6 +2,8 @@ import os
 
 from cysqlite import *
 
+def pd():
+    print('-' * 70)
 
 conn = Connection(':memory:')
 conn.connect()
@@ -15,7 +17,7 @@ r = conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
 print(r)
 print(conn.last_insert_rowid())
 
-print('-' * 70)
+pd()
 
 curs = conn.execute('select * from kv where key > ? order by key desc', ('k1',))
 for row in curs:
@@ -33,7 +35,7 @@ with conn.atomic() as txn:
         sp.rollback()
     conn.execute('insert into kv (key, value) values (?, ?)', ('k7', 'v7'))
 
-print('-' * 70)
+pd()
 
 curs = conn.execute('select * from kv where key > ? order by key desc', ('k2',))
 for row in curs:
@@ -42,7 +44,7 @@ for row in curs:
 conn.execute_simple('drop table kv')
 conn.close()
 
-print('-' * 70)
+pd()
 
 conn.connect()
 conn.execute('create table foo (id integer not null primary key, key text)')
@@ -75,7 +77,7 @@ with conn.atomic():
 
 conn.close()
 
-print('-' * 70)
+pd()
 
 # Test blob I/O.
 conn.connect()
@@ -112,7 +114,7 @@ for row in conn.execute('select * from register'):
 
 conn.close()
 
-print('-' * 70)
+pd()
 
 conn = Connection(':memory:')
 conn.connect()
@@ -163,7 +165,7 @@ for row in conn.execute(w_sql):
 
 conn.close()
 
-print('-' * 70)
+pd()
 
 def my_collation(s1, s2):
     x1 = s1.lower()[::-1]
@@ -177,5 +179,12 @@ conn.execute('create table kv (key text, value text)')
 conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
              ('k1', 'v1x', 'k2', 'v222y', 'k3', 'v3a'))
 
-for row in conn.execute('select * from kv order by value collate rev'):
+curs = conn.execute('select * from kv order by value collate rev')
+print(curs.description())
+for row in curs:
     print(row)
+
+pd()
+
+print(sqlite_version)
+print(sqlite_version_info)

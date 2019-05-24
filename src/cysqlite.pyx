@@ -33,6 +33,15 @@ cdef class Transaction(object)
 cdef class Savepoint(object)
 cdef class Blob(object)
 
+# TODO:
+# - commit, rollback, update, pre-update hooks.
+# - statement authorizer.
+# - shared cache enable.
+# - table column metadata / introspection.
+# - load extension, enable load extension.
+# - create virtual tables.
+# - serialize / deserialize.
+
 
 cdef raise_sqlite_error(sqlite3 *db, unicode msg):
     msg = msg or ''
@@ -51,6 +60,7 @@ cdef class _callable_context_manager(object):
 cdef class Connection(_callable_context_manager):
     cdef:
         sqlite3 *db
+        public bint uri
         public int cached_statements
         public int flags
         public int timeout
@@ -62,11 +72,12 @@ cdef class Connection(_callable_context_manager):
         dict stmt_in_use  # id(stmt) -> Statement.
         int _transaction_depth
 
-    def __init__(self, database, flags=None, timeout=5000, vfs=None,
+    def __init__(self, database, flags=None, timeout=5000, vfs=None, uri=False,
                  cached_statements=100):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
+        self.uri = uri
         self.vfs = vfs
         self.cached_statements = cached_statements
         self.db = NULL
@@ -83,6 +94,10 @@ cdef class Connection(_callable_context_manager):
     def close(self):
         if not self.db:
             return False
+
+        if self._transaction_depth > 0:
+            raise SqliteError('cannot close database while a transaction is '
+                              'open.')
 
         # Drop references to user-defined functions.
         self.functions = {}
@@ -110,6 +125,9 @@ cdef class Connection(_callable_context_manager):
         if self.vfs is not None:
             bvfs = encode(self.vfs)
             zvfs = PyBytes_AsString(bvfs)
+
+        if self.uri or bdatabase.find(b'://') >= 0:
+            flags |= SQLITE_OPEN_URI
 
         rc = sqlite3_open_v2(zdatabase, &self.db, flags, zvfs)
         if rc != SQLITE_OK:
@@ -189,8 +207,17 @@ cdef class Connection(_callable_context_manager):
     def changes(self):
         return sqlite3_changes(self.db)
 
+    def total_changes(self):
+        return sqlite3_total_changes(self.db)
+
     def last_insert_rowid(self):
         return sqlite3_last_insert_rowid(self.db)
+
+    def interrupt(self):
+        sqlite3_interrupt(self.db)
+
+    def autocommit(self):
+        return sqlite3_get_autocommit(self.db)
 
     def status(self, flag):
         cdef int current, highwater, rc
@@ -370,6 +397,30 @@ cdef class Connection(_callable_context_manager):
 
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error creating collation: ')
+
+    def set_main_db_name(self, name):
+        cdef bytes bname = encode(name)
+        if sqlite3_db_config(self.db, SQLITE_DBCONFIG_MAINDBNAME,
+                             <const char *>bname) != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error setting main db name: ')
+    cdef _do_config(self, int config, int enabled):
+        cdef int rc, status
+        rc = sqlite3_db_config(self.db, config, enabled, &status)
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error setting config value: ')
+        return status
+    def set_foreign_keys(self, int enabled):
+        return self._do_config(SQLITE_DBCONFIG_ENABLE_FKEY, enabled)
+    def get_foreign_keys(self):
+        return self._do_config(SQLITE_DBCONFIG_ENABLE_FKEY, -1)
+    def set_triggers(self, int enabled):
+        return self._do_config(SQLITE_DBCONFIG_ENABLE_TRIGGER, enabled)
+    def get_triggers(self):
+        return self._do_config(SQLITE_DBCONFIG_ENABLE_TRIGGER, -1)
+    def set_load_extension(self, int enabled):
+        return self._do_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, enabled)
+    def get_load_extension(self):
+        return self._do_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, -1)
 
 
 cdef class _Callback(object):
@@ -765,6 +816,32 @@ cdef class Statement(object):
 
         return result
 
+    def column_count(self):
+        if not self.st: raise SqliteError('statement is not available')
+        return sqlite3_column_count(self.st)
+
+    def description(self):
+        cdef:
+            bytes col_name
+            int col_count, i
+            list accum = []
+
+        col_count = sqlite3_column_count(self.st)
+        for i in range(col_count):
+            col_name = sqlite3_column_name(self.st, i)
+            accum.append(decode(col_name))
+        return accum
+
+    def is_readonly(self):
+        if not self.st: raise SqliteError('statement is not available')
+        return sqlite3_stmt_readonly(self.st)
+    def is_explain(self):
+        if not self.st: raise SqliteError('statement is not available')
+        return sqlite3_stmt_isexplain(self.st)
+    def is_busy(self):
+        if not self.st: raise SqliteError('statement is not available')
+        return sqlite3_stmt_busy(self.st)
+
 
 cdef inline int _check_blob_closed(Blob blob) except -1:
     if not blob.blob:
@@ -905,6 +982,10 @@ cdef class Blob(object):
             raise_sqlite_error(self.conn.db, 'unable to reopen blob: ')
 
 
+sqlite_version = decode(sqlite3_version)
+sqlite_version_info = sqlite3_libversion_number()
+
+
 def status(flag):
     cdef int current, highwater, rc
 
@@ -912,6 +993,25 @@ def status(flag):
     if rc != SQLITE_OK:
         raise SqliteError('error requesting status: %s' % rc)
     return (current, highwater)
+
+
+def set_singlethread(self):
+    return sqlite3_config(SQLITE_CONFIG_SINGLETHREAD) == SQLITE_OK
+def set_multithread(self):
+    return sqlite3_config(SQLITE_CONFIG_MULTITHREAD) == SQLITE_OK
+def set_serialized(self):
+    return sqlite3_config(SQLITE_CONFIG_SERIALIZED) == SQLITE_OK
+def set_lookaside(self, int size, int slots):
+    return sqlite3_config(SQLITE_CONFIG_LOOKASIDE, size, slots) == SQLITE_OK
+def set_mmap_size(self, default_size, max_size):
+    return sqlite3_config(SQLITE_CONFIG_MMAP_SIZE,
+                          <sqlite3_int64>default_size,
+                          <sqlite3_int64>max_size) == SQLITE_OK
+def set_stmt_journal_spill(self, int nbytes):
+    # nbytes is the spill-to-disk threshold. Statement journals are held in
+    # memory until their size exceeds this threshold. Set to -1 to keep
+    # journals exclusively in memory.
+    return sqlite3_config(SQLITE_CONFIG_STMTJRNL_SPILL, nbytes) == SQLITE_OK
 
 
 cdef tuple sqlite_to_python(int argc, sqlite3_value **params):
