@@ -12,6 +12,12 @@ from cpython.tuple cimport PyTuple_New
 from cpython.tuple cimport PyTuple_SET_ITEM
 from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.unicode cimport PyUnicode_DecodeUTF8
+from libc.float cimport DBL_MAX
+from libc.stdint cimport int64_t
+from libc.stdint cimport uint32_t
+from libc.stdlib cimport rand
+from libc.string cimport memcpy
+from libc.string cimport memset
 
 
 from collections import namedtuple
@@ -458,6 +464,10 @@ cdef class Connection(_callable_context_manager):
 
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting authorizer: ')
+
+    def set_busy_handler(self, timeout=5):
+        cdef sqlite3_int64 n = timeout * 1000
+        sqlite3_busy_handler(self.db, _aggressive_busy_handler, <void *>n)
 
     def set_main_db_name(self, name):
         cdef bytes bname = encode(name)
@@ -1155,6 +1165,346 @@ cdef class Blob(object):
             raise_sqlite_error(self.conn.db, 'unable to reopen blob: ')
 
 
+# The cysqlite_vtab struct embeds the base sqlite3_vtab struct, and adds a
+# field to store a reference to the Python implementation.
+ctypedef struct cysqlite_vtab:
+    sqlite3_vtab base
+    void *table_func_cls
+
+
+# Like cysqlite_vtab, the cysqlite_cursor embeds the base sqlite3_vtab_cursor
+# and adds fields to store references to the current index, the Python
+# implementation, the current rows' data, and a flag for whether the cursor has
+# been exhausted.
+ctypedef struct cysqlite_cursor:
+    sqlite3_vtab_cursor base
+    long long idx
+    void *table_func
+    void *row_data
+    bint stopped
+
+
+# We define an xConnect function, but leave xCreate NULL so that the
+# table-function can be called eponymously.
+cdef int cyConnect(sqlite3 *db, void *pAux, int argc, const char *const*argv,
+                   sqlite3_vtab **ppVtab, char **pzErr) with gil:
+    cdef:
+        int rc
+        object table_func_cls = <object>pAux
+        cysqlite_vtab *pNew = <cysqlite_vtab *>0
+
+    rc = sqlite3_declare_vtab(
+        db,
+        encode('CREATE TABLE x(%s);' %
+               table_func_cls.get_table_columns_declaration()))
+    if rc == SQLITE_OK:
+        pNew = <cysqlite_vtab *>sqlite3_malloc(sizeof(pNew[0]))
+        memset(<char *>pNew, 0, sizeof(pNew[0]))
+        ppVtab[0] = &(pNew.base)
+
+        pNew.table_func_cls = <void *>table_func_cls
+        Py_INCREF(table_func_cls)
+
+    return rc
+
+
+cdef int cyDisconnect(sqlite3_vtab *pBase) with gil:
+    cdef:
+        cysqlite_vtab *pVtab = <cysqlite_vtab *>pBase
+        object table_func_cls = <object>(pVtab.table_func_cls)
+
+    Py_DECREF(table_func_cls)
+    sqlite3_free(pVtab)
+    return SQLITE_OK
+
+
+# The xOpen method is used to initialize a cursor. In this method we
+# instantiate the TableFunction class and zero out a new cursor for iteration.
+cdef int cyOpen(sqlite3_vtab *pBase, sqlite3_vtab_cursor **ppCursor) with gil:
+    cdef:
+        cysqlite_vtab *pVtab = <cysqlite_vtab *>pBase
+        cysqlite_cursor *pCur = <cysqlite_cursor *>0
+        object table_func_cls = <object>pVtab.table_func_cls
+
+    pCur = <cysqlite_cursor *>sqlite3_malloc(sizeof(pCur[0]))
+    memset(<char *>pCur, 0, sizeof(pCur[0]))
+    ppCursor[0] = &(pCur.base)
+    pCur.idx = 0
+    try:
+        table_func = table_func_cls()
+    except:
+        if table_func_cls.print_tracebacks:
+            traceback.print_exc()
+        sqlite3_free(pCur)
+        return SQLITE_ERROR
+
+    Py_INCREF(table_func)
+    pCur.table_func = <void *>table_func
+    pCur.stopped = False
+    return SQLITE_OK
+
+
+cdef int cyClose(sqlite3_vtab_cursor *pBase) with gil:
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        object table_func = <object>pCur.table_func
+    Py_DECREF(table_func)
+    sqlite3_free(pCur)
+    return SQLITE_OK
+
+
+# Iterate once, advancing the cursor's index and assigning the row data to the
+# `row_data` field on the cysqlite_cursor struct.
+cdef int cyNext(sqlite3_vtab_cursor *pBase) with gil:
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        object table_func = <object>pCur.table_func
+        tuple result
+
+    if pCur.row_data:
+        Py_DECREF(<tuple>pCur.row_data)
+
+    pCur.row_data = NULL
+    try:
+        result = tuple(table_func.iterate(pCur.idx))
+    except StopIteration:
+        pCur.stopped = True
+    except:
+        if table_func.print_tracebacks:
+            traceback.print_exc()
+        return SQLITE_ERROR
+    else:
+        Py_INCREF(result)
+        pCur.row_data = <void *>result
+        pCur.idx += 1
+        pCur.stopped = False
+
+    return SQLITE_OK
+
+
+# Return the requested column from the current row.
+cdef int cyColumn(sqlite3_vtab_cursor *pBase, sqlite3_context *ctx,
+                  int iCol) with gil:
+    cdef:
+        bytes bval
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        sqlite3_int64 x = 0
+        tuple row_data
+
+    if iCol == -1:
+        sqlite3_result_int64(ctx, <sqlite3_int64>pCur.idx)
+        return SQLITE_OK
+
+    if not pCur.row_data:
+        sqlite3_result_error(ctx, encode('no row data'), -1)
+        return SQLITE_ERROR
+
+    row_data = <tuple>pCur.row_data
+    return python_to_sqlite(ctx, row_data[iCol])
+
+
+cdef int cyRowid(sqlite3_vtab_cursor *pBase, sqlite3_int64 *pRowid):
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+    pRowid[0] = <sqlite3_int64>pCur.idx
+    return SQLITE_OK
+
+
+# Return a boolean indicating whether the cursor has been consumed.
+cdef int cyEof(sqlite3_vtab_cursor *pBase):
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+    return 1 if pCur.stopped else 0
+
+
+# The filter method is called on the first iteration. This method is where we
+# get access to the parameters that the function was called with, and call the
+# TableFunction's `initialize()` function.
+cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
+                  const char *idxStr, int argc, sqlite3_value **argv) with gil:
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        object table_func = <object>pCur.table_func
+        dict query = {}
+        int idx
+        int value_type
+        tuple row_data
+        void *row_data_raw
+
+    if not idxStr or argc == 0 and len(table_func.params):
+        return SQLITE_ERROR
+    elif len(idxStr):
+        params = decode(idxStr).split(',')
+    else:
+        params = []
+
+    py_values = sqlite_to_python(argc, argv)
+
+    for idx, param in enumerate(params):
+        value = argv[idx]
+        if not value:
+            query[param] = None
+        else:
+            query[param] = py_values[idx]
+
+    try:
+        table_func.initialize(**query)
+    except:
+        if table_func.print_tracebacks:
+            traceback.print_exc()
+        return SQLITE_ERROR
+
+    pCur.stopped = False
+    try:
+        row_data = tuple(table_func.iterate(0))
+    except StopIteration:
+        pCur.stopped = True
+    except:
+        if table_func.print_tracebacks:
+            traceback.print_exc()
+        return SQLITE_ERROR
+    else:
+        Py_INCREF(row_data)
+        pCur.row_data = <void *>row_data
+        pCur.idx += 1
+    return SQLITE_OK
+
+
+# SQLite will (in some cases, repeatedly) call the xBestIndex method to try and
+# find the best query plan.
+cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
+        with gil:
+    cdef:
+        int i
+        int idxNum = 0, nArg = 0
+        cysqlite_vtab *pVtab = <cysqlite_vtab *>pBase
+        object table_func_cls = <object>pVtab.table_func_cls
+        sqlite3_index_constraint *pConstraint = <sqlite3_index_constraint *>0
+        list columns = []
+        char *idxStr
+        int nParams = len(table_func_cls.params)
+
+    for i in range(pIdxInfo.nConstraint):
+        pConstraint = pIdxInfo.aConstraint + i
+        if not pConstraint.usable:
+            continue
+        if pConstraint.op != SQLITE_INDEX_CONSTRAINT_EQ:
+            continue
+
+        columns.append(table_func_cls.params[pConstraint.iColumn -
+                                             table_func_cls._ncols])
+        nArg += 1
+        pIdxInfo.aConstraintUsage[i].argvIndex = nArg
+        pIdxInfo.aConstraintUsage[i].omit = 1
+
+    if nArg > 0 or nParams == 0:
+        if nArg == nParams:
+            # All parameters are present, this is ideal.
+            pIdxInfo.estimatedCost = <double>1
+            pIdxInfo.estimatedRows = 10
+        else:
+            # Penalize score based on number of missing params.
+            pIdxInfo.estimatedCost = <double>10000000000000 * <double>(nParams - nArg)
+            pIdxInfo.estimatedRows = 10 ** (nParams - nArg)
+
+        # Store a reference to the columns in the index info structure.
+        joinedCols = encode(','.join(columns))
+        idxStr = <char *>sqlite3_malloc((len(joinedCols) + 1) * sizeof(char))
+        memcpy(idxStr, <char *>joinedCols, len(joinedCols))
+        idxStr[len(joinedCols)] = b'\x00'
+        pIdxInfo.idxStr = idxStr
+        pIdxInfo.needToFreeIdxStr = 0
+        return SQLITE_OK
+
+    return SQLITE_CONSTRAINT
+
+
+cdef class _TableFunctionImpl(object):
+    cdef:
+        sqlite3_module module
+        object table_function
+
+    def __cinit__(self, table_function):
+        self.table_function = table_function
+
+    cdef create_module(self, Connection conn):
+        cdef:
+            bytes name = encode(self.table_function.name)
+            sqlite3 *db = conn.db
+            int rc
+
+        # Populate the SQLite module struct members.
+        self.module.iVersion = 0
+        self.module.xCreate = NULL
+        self.module.xConnect = cyConnect
+        self.module.xBestIndex = cyBestIndex
+        self.module.xDisconnect = cyDisconnect
+        self.module.xDestroy = NULL
+        self.module.xOpen = cyOpen
+        self.module.xClose = cyClose
+        self.module.xFilter = cyFilter
+        self.module.xNext = cyNext
+        self.module.xEof = cyEof
+        self.module.xColumn = cyColumn
+        self.module.xRowid = cyRowid
+        self.module.xUpdate = NULL
+        self.module.xBegin = NULL
+        self.module.xSync = NULL
+        self.module.xCommit = NULL
+        self.module.xRollback = NULL
+        self.module.xFindFunction = NULL
+        self.module.xRename = NULL
+
+        # Create the SQLite virtual table.
+        rc = sqlite3_create_module(
+            db,
+            <const char *>name,
+            &self.module,
+            <void *>(self.table_function))
+
+        Py_INCREF(self)
+
+        return rc == SQLITE_OK
+
+
+class TableFunction(object):
+    columns = None
+    params = None
+    name = None
+    print_tracebacks = True
+    _ncols = None
+
+    @classmethod
+    def register(cls, Connection conn):
+        cdef _TableFunctionImpl impl = _TableFunctionImpl(cls)
+        impl.create_module(conn)
+        cls._ncols = len(cls.columns)
+
+    def initialize(self, **filters):
+        raise NotImplementedError
+
+    def iterate(self, idx):
+        raise NotImplementedError
+
+    @classmethod
+    def get_table_columns_declaration(cls):
+        cdef list accum = []
+
+        for column in cls.columns:
+            if isinstance(column, tuple):
+                if len(column) != 2:
+                    raise ValueError('Column must be either a string or a '
+                                     '2-tuple of name, type')
+                accum.append('%s %s' % column)
+            else:
+                accum.append(column)
+
+        for param in cls.params:
+            accum.append('%s HIDDEN' % param)
+
+        return ', '.join(accum)
+
+
 sqlite_version = decode(sqlite3_version)
 sqlite_version_info = sqlite3_libversion_number()
 
@@ -1249,3 +1599,85 @@ cdef python_to_sqlite(sqlite3_context *context, param):
         return SQLITE_ERROR
 
     return SQLITE_OK
+
+
+# Misc helpers.
+cdef uint32_t murmurhash2(const unsigned char *key, ssize_t nlen,
+                          uint32_t seed):
+    cdef:
+        uint32_t m = 0x5bd1e995
+        int r = 24
+        const unsigned char *data = key
+        uint32_t h = seed ^ nlen
+        uint32_t k
+
+    while nlen >= 4:
+        k = <uint32_t>((<uint32_t *>data)[0])
+
+        k *= m
+        k = k ^ (k >> r)
+        k *= m
+
+        h *= m
+        h = h ^ k
+
+        data += 4
+        nlen -= 4
+
+    if nlen == 3:
+        h = h ^ (data[2] << 16)
+    if nlen >= 2:
+        h = h ^ (data[1] << 8)
+    if nlen >= 1:
+        h = h ^ (data[0])
+        h *= m
+
+    h = h ^ (h >> 13)
+    h *= m
+    h = h ^ (h >> 15)
+    return h
+
+
+def cymurmurhash(key, seed=None):
+    if key is None:
+        return
+
+    cdef:
+        bytes bkey = encode(key)
+        char *data
+        int iseed = seed or 0
+        Py_ssize_t nbytes
+
+    PyBytes_AsStringAndSize(bkey, &data, &nbytes)
+
+    if key:
+        return murmurhash2(<unsigned char *>data, <int64_t>nbytes, iseed)
+    return 0
+
+
+cdef int _aggressive_busy_handler(void *ptr, int n) nogil:
+    # In concurrent environments, it often seems that if multiple queries are
+    # kicked off at around the same time, they proceed in lock-step to check
+    # for the availability of the lock. By introducing some "jitter" we can
+    # ensure that this doesn't happen. Furthermore, this function makes more
+    # attempts in the same time period than the default handler.
+    cdef:
+        sqlite3_int64 busyTimeout = <sqlite3_int64>ptr
+        int current, total
+
+    if n < 20:
+        current = 25 - (rand() % 10)  # ~20ms
+        total = n * 20
+    elif n < 40:
+        current = 50 - (rand() % 20)  # ~40ms
+        total = 400 + ((n - 20) * 40)
+    else:
+        current = 120 - (rand() % 40)  # ~100ms
+        total = 1200 + ((n - 40) * 100)  # Estimate the amount of time slept.
+
+    if total + current > busyTimeout:
+        current = busyTimeout - total
+    if current > 0:
+        sqlite3_sleep(current)
+        return 1
+    return 0

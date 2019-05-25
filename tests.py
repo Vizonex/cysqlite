@@ -118,6 +118,7 @@ pd()
 
 conn = Connection(':memory:')
 conn.connect()
+conn.set_busy_handler(4)
 conn.execute('create table kv (key text, value text)')
 conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
              ('k1', 'v1', 'k2', 'v2x', 'k3', 'v3-y'))
