@@ -385,7 +385,16 @@ cdef extern from "sqlite3.h" nogil:
     cdef sqlite3_int64 sqlite3_memory_used()
     cdef sqlite3_int64 sqlite3_memory_highwater(int resetFlag)
     #cdef void sqlite3_randomness(int N, void *P)
-    cdef int sqlite3_set_authorizer(sqlite3*, int (*xAuth)(void*,int,const char*,const char*,const char*,const char*), void *pUserData)
+    cdef int sqlite3_set_authorizer(
+        sqlite3*,
+        int (*xAuth)(
+            void*,
+            int,
+            const char*,
+            const char*,
+            const char*,
+            const char*),
+        void *pUserData)
     cdef int sqlite3_trace_v2(sqlite3*, unsigned uMask, int(*xCallback)(unsigned,void*,void*,void*), void *pCtx)
     cdef void sqlite3_progress_handler(sqlite3*, int, int(*)(void*), void*)
     #cdef int sqlite3_open(const char *filename, sqlite3 **ppDb)
@@ -615,7 +624,18 @@ cdef extern from "sqlite3.h" nogil:
     cdef int sqlite3_stmt_scanstatus(sqlite3_stmt *pStmt, int idx, int iScanStatusOp, void *pOut)
     cdef void sqlite3_stmt_scanstatus_reset(sqlite3_stmt*)
     cdef int sqlite3_db_cacheflush(sqlite3*)
-    cdef void *sqlite3_preupdate_hook(sqlite3 *db, void(*xPreUpdate)(void *pCtx, sqlite3 *db, int op, char *zDb, char *zName, sqlite3_int64 iKey1, sqlite3_int64 iKey2), void*)
+    # Requires sqlite be compiled with ENABLE_PREUPDATE_HOOK.
+    cdef void *sqlite3_preupdate_hook(
+        sqlite3 *db,
+        void(*xPreUpdate)(
+            void *pCtx,
+            sqlite3 *db,
+            int op,
+            char *zDb,
+            char *zName,
+            sqlite3_int64 iKey1,
+            sqlite3_int64 iKey2),
+        void*)
     cdef int sqlite3_preupdate_old(sqlite3 *, int, sqlite3_value **)
     cdef int sqlite3_preupdate_count(sqlite3 *)
     cdef int sqlite3_preupdate_depth(sqlite3 *)

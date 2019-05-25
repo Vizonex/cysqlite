@@ -175,6 +175,10 @@ def my_collation(s1, s2):
 conn.connect()
 conn.create_collation(my_collation, 'rev')
 
+def update_hook(qtype, db, tbl, rowid):
+    print(qtype, db, tbl, rowid)
+conn.update_hook(update_hook)
+
 conn.execute('create table kv (key text, value text)')
 conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
              ('k1', 'v1x', 'k2', 'v222y', 'k3', 'v3a'))

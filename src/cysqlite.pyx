@@ -28,14 +28,13 @@ class SqliteError(Exception):
 
 
 # Forward references.
+cdef class _Callback(object)
 cdef class Statement(object)
 cdef class Transaction(object)
 cdef class Savepoint(object)
 cdef class Blob(object)
 
 # TODO:
-# - commit, rollback, update, pre-update hooks.
-# - statement authorizer.
 # - shared cache enable.
 # - table column metadata / introspection.
 # - load extension, enable load extension.
@@ -71,6 +70,7 @@ cdef class Connection(_callable_context_manager):
         dict stmt_available  # sql -> Statement.
         dict stmt_in_use  # id(stmt) -> Statement.
         int _transaction_depth
+        _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
 
     def __init__(self, database, flags=None, timeout=5000, vfs=None, uri=False,
                  cached_statements=100):
@@ -105,6 +105,22 @@ cdef class Connection(_callable_context_manager):
         # When the statements are deallocated, they will be finalized.
         self.stmt_available = {}
         self.stmt_in_use = {}
+
+        # Clear hooks.
+        if self._commit_hook is not None:
+            sqlite3_commit_hook(self.db, NULL, NULL)
+            self._commit_hook = None
+        if self._rollback_hook is not None:
+            sqlite3_rollback_hook(self.db, NULL, NULL)
+            self._rollback_hook = None
+        if self._update_hook is not None:
+            sqlite3_update_hook(self.db, NULL, NULL)
+            self._update_hook = None
+
+        # Clear authorizer.
+        if self._auth_hook is not None:
+            sqlite3_set_authorizer(self.db, NULL, NULL)
+            self._auth_hook = None
 
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
@@ -398,6 +414,51 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error creating collation: ')
 
+    def commit_hook(self, fn):
+        if fn is None:
+            self._commit_hook = None
+            sqlite3_commit_hook(self.db, NULL, NULL)
+            return
+
+        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        self._commit_hook = callback
+        sqlite3_commit_hook(self.db, _commit_cb, <void *>callback)
+
+    def rollback_hook(self, fn):
+        if fn is None:
+            self._rollback_hook = None
+            sqlite3_rollback_hook(self.db, NULL, NULL)
+            return
+        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        self._rollback_hook = callback
+        sqlite3_rollback_hook(self.db, _rollback_cb, <void *>callback)
+
+    def update_hook(self, fn):
+        if fn is None:
+            self._update_hook = None
+            sqlite3_update_hook(self.db, NULL, NULL)
+            return
+
+        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        self._update_hook = callback
+        sqlite3_update_hook(self.db, _update_cb, <void *>callback)
+
+    def authorizer(self, fn):
+        cdef:
+            _Callback callback
+            int rc
+
+        if fn is None:
+            self._auth_hook = None
+            rc = sqlite3_set_authorizer(self.db, NULL, NULL)
+        else:
+            callback = _Callback.__new__(_Callback, self, fn)
+            self._auth_hook = callback
+            rc = sqlite3_set_authorizer(self.db, _auth_cb, <void *>callback)
+
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error setting authorizer: ')
+
     def set_main_db_name(self, name):
         cdef bytes bname = encode(name)
         if sqlite3_db_config(self.db, SQLITE_DBCONFIG_MAINDBNAME,
@@ -547,6 +608,118 @@ cdef int _collation_cb(void *data, int n1, const void *data1,
     elif result < 0:
         return -1
     return 0
+
+
+cdef int _commit_cb(void *data) with gil:
+    # C-callback that delegates to the Python commit handler. If the Python
+    # function raises a ValueError, then the commit is aborted and the
+    # transaction rolled back. Otherwise, regardless of the function return
+    # value, the transaction will commit.
+    cdef _Callback cb = <_Callback>data
+    try:
+        cb.fn()
+    except ValueError:
+        return SQLITE_ERROR
+    except Exception as exc:
+        traceback.print_exc()
+    return SQLITE_OK
+
+
+cdef void _rollback_cb(void *data) with gil:
+    # C-callback that delegates to the Python rollback handler.
+    cdef _Callback cb = <_Callback>data
+    try:
+        cb.fn()
+    except Exception as exc:
+        traceback.print_exc()
+
+
+cdef void _update_cb(void *data, int queryType, const char *database,
+                     const char *table, sqlite3_int64 rowid) with gil:
+    # C-callback that delegates to a Python function that is executed whenever
+    # the database is updated (insert/update/delete queries). The Python
+    # callback receives a string indicating the query type, the name of the
+    # database, the name of the table being updated, and the rowid of the row
+    # being updatd.
+    cdef _Callback cb = <_Callback>data
+    if queryType == SQLITE_INSERT:
+        query = 'INSERT'
+    elif queryType == SQLITE_UPDATE:
+        query = 'UPDATE'
+    elif queryType == SQLITE_DELETE:
+        query = 'DELETE'
+    else:
+        query = ''
+
+    try:
+        cb.fn(query, decode(database), decode(table), <int>rowid)
+    except Exception as exc:
+        traceback.print_exc()
+
+
+AUTH_OK = 0
+AUTH_DENY = 1
+AUTH_IGNORE = 2
+
+
+cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
+                  const char *p3, const char *p4) with gil:
+    # Return SQLITE_OK to allow.
+    # SQLITE_IGNORE allows compilation but disallows the specific action.
+    # SQLITE_DENY prevents compilation completely.
+    # Params 3 and 4 are provided by the following table.
+    # Param 5 is the database name ("main", "temp", if applicable).
+    # Param 6 is the inner-most trigger or view that is responsible for the
+    # access attempt, or NULL if from top-level SQL code.
+    #
+    # SQLITE_CREATE_INDEX          1   Index Name      Table Name
+    # SQLITE_CREATE_TABLE          2   Table Name      NULL
+    # SQLITE_CREATE_TEMP_INDEX     3   Index Name      Table Name
+    # SQLITE_CREATE_TEMP_TABLE     4   Table Name      NULL
+    # SQLITE_CREATE_TEMP_TRIGGER   5   Trigger Name    Table Name
+    # SQLITE_CREATE_TEMP_VIEW      6   View Name       NULL
+    # SQLITE_CREATE_TRIGGER        7   Trigger Name    Table Name
+    # SQLITE_CREATE_VIEW           8   View Name       NULL
+    # SQLITE_DELETE                9   Table Name      NULL
+    # SQLITE_DROP_INDEX           10   Index Name      Table Name
+    # SQLITE_DROP_TABLE           11   Table Name      NULL
+    # SQLITE_DROP_TEMP_INDEX      12   Index Name      Table Name
+    # SQLITE_DROP_TEMP_TABLE      13   Table Name      NULL
+    # SQLITE_DROP_TEMP_TRIGGER    14   Trigger Name    Table Name
+    # SQLITE_DROP_TEMP_VIEW       15   View Name       NULL
+    # SQLITE_DROP_TRIGGER         16   Trigger Name    Table Name
+    # SQLITE_DROP_VIEW            17   View Name       NULL
+    # SQLITE_INSERT               18   Table Name      NULL
+    # SQLITE_PRAGMA               19   Pragma Name     1st arg or NULL
+    # SQLITE_READ                 20   Table Name      Column Name
+    # SQLITE_SELECT               21   NULL            NULL
+    # SQLITE_TRANSACTION          22   Operation       NULL
+    # SQLITE_UPDATE               23   Table Name      Column Name
+    # SQLITE_ATTACH               24   Filename        NULL
+    # SQLITE_DETACH               25   Database Name   NULL
+    # SQLITE_ALTER_TABLE          26   Database Name   Table Name
+    # SQLITE_REINDEX              27   Index Name      NULL
+    # SQLITE_ANALYZE              28   Table Name      NULL
+    # SQLITE_CREATE_VTABLE        29   Table Name      Module Name
+    # SQLITE_DROP_VTABLE          30   Table Name      Module Name
+    # SQLITE_FUNCTION             31   NULL            Function Name
+    # SQLITE_SAVEPOINT            32   Operation       Savepoint Name
+    # SQLITE_COPY                  0   <not used>
+    # SQLITE_RECURSIVE            33   NULL            NULL
+    cdef:
+        _Callback cb = <_Callback>data
+        int rc
+        unicode s1 = decode(p1) if p1 != NULL else None
+        unicode s2 = decode(p2) if p2 != NULL else None
+        unicode s3 = decode(p3) if p3 != NULL else None
+        unicode s4 = decode(p4) if p4 != NULL else None
+
+    try:
+        rc = cb.fn(op, s1, s2, s3, s4)
+    except Exception as exc:
+        traceback.print_exc()
+        rc = SQLITE_OK
+    return rc
 
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) with gil:
