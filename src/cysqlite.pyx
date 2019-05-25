@@ -41,11 +41,7 @@ cdef class Savepoint(object)
 cdef class Blob(object)
 
 # TODO:
-# - shared cache enable.
-# - table column metadata / introspection.
-# - load extension, enable load extension.
-# - create virtual tables.
-# - serialize / deserialize.
+# - table_column_metadata / introspection.
 
 
 cdef raise_sqlite_error(sqlite3 *db, unicode msg):
@@ -65,6 +61,7 @@ cdef class _callable_context_manager(object):
 cdef class Connection(_callable_context_manager):
     cdef:
         sqlite3 *db
+        public bint extensions
         public bint uri
         public int cached_statements
         public int flags
@@ -79,11 +76,12 @@ cdef class Connection(_callable_context_manager):
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
 
     def __init__(self, database, flags=None, timeout=5000, vfs=None, uri=False,
-                 cached_statements=100):
+                 extensions=True, cached_statements=100):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
         self.uri = uri
+        self.extensions = extensions
         self.vfs = vfs
         self.cached_statements = cached_statements
         self.db = NULL
@@ -155,6 +153,11 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             self.db = NULL
             raise SqliteError('error opening database: %s.' % rc)
+
+        if self.extensions:
+            rc = sqlite3_enable_load_extension(self.db, 1)
+            if rc != SQLITE_OK:
+                raise_sqlite_error(self.db, 'error enabling extension: ')
 
         rc = sqlite3_busy_timeout(self.db, self.timeout)
         if rc != SQLITE_OK:
@@ -316,6 +319,16 @@ cdef class Connection(_callable_context_manager):
         cdef Connection dest = Connection(filename)
         self.backup(dest, pages, name, progress, src_name)
         dest.close()
+
+    def load_extension(self, name):
+        cdef:
+            bytes bname = encode(name)
+            char *errmsg
+            int rc
+
+        rc = sqlite3_load_extension(self.db, bname, NULL, &errmsg)
+        if rc != SQLITE_OK:
+            raise SqliteError('error loading extension: %s' % decode(errmsg))
 
     def create_function(self, fn, name=None, nargs=-1, deterministic=True):
         cdef:
@@ -492,6 +505,11 @@ cdef class Connection(_callable_context_manager):
         return self._do_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, enabled)
     def get_load_extension(self):
         return self._do_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, -1)
+    def set_shared_cache(self, int enabled):
+        cdef int rc = sqlite3_enable_shared_cache(enabled)
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error setting shared cache: ')
+        return enabled
 
 
 cdef class _Callback(object):
@@ -1015,6 +1033,29 @@ cdef class Statement(object):
             accum.append(decode(col_name))
         return accum
 
+    def details(self):
+        if not HAS_COLUMN_METADATA:
+            raise SqliteError('sqlite3 must be compiled with COLUMN_METADATA')
+
+        cdef:
+            bytes col_name, table_name, origin_name, decltype
+            int col_count, i
+            list accum = []
+
+        col_count = sqlite3_column_count(self.st)
+        for i in range(col_count):
+            col_name = sqlite3_column_name(self.st, i)
+            table_name = sqlite3_column_table_name(self.st, i)
+            origin_name = sqlite3_column_origin_name(self.st, i)
+            decltype = sqlite3_column_decltype(self.st, i)
+            accum.append((
+                decode(col_name),
+                decode(table_name),
+                decode(origin_name),
+                decode(decltype)))
+
+        return accum
+
     def is_readonly(self):
         if not self.st: raise SqliteError('statement is not available')
         return sqlite3_stmt_readonly(self.st)
@@ -1535,6 +1576,16 @@ def set_stmt_journal_spill(self, int nbytes):
     # memory until their size exceeds this threshold. Set to -1 to keep
     # journals exclusively in memory.
     return sqlite3_config(SQLITE_CONFIG_STMTJRNL_SPILL, nbytes) == SQLITE_OK
+
+
+def compile_option(opt):
+    cdef bopt = encode(opt)
+    return sqlite3_compileoption_used(bopt)
+
+
+HAS_COLUMN_METADATA = compile_option('enable_column_metadata')
+#HAS_PREUPDATE_HOOK = compile_option('enable_preupdate_hook')
+#HAS_STMT_SCANSTATUS = compile_option('enable_stmt_scanstatus')
 
 
 cdef tuple sqlite_to_python(int argc, sqlite3_value **params):
