@@ -138,6 +138,8 @@ cdef class Connection(_callable_context_manager):
         return True
 
     def connect(self):
+        if self.db: return False
+
         cdef:
             bytes bdatabase = encode(self.database)
             bytes bvfs
@@ -162,7 +164,7 @@ cdef class Connection(_callable_context_manager):
         if self.extensions:
             rc = sqlite3_enable_load_extension(self.db, 1)
             if rc != SQLITE_OK:
-                raise_sqlite_error(self.db, 'error enabling extension: ')
+                raise_sqlite_error(self.db, 'error enabling extensions: ')
 
         rc = sqlite3_busy_timeout(self.db, self.timeout)
         if rc != SQLITE_OK:
@@ -172,6 +174,9 @@ cdef class Connection(_callable_context_manager):
 
     cpdef is_closed(self):
         return self.db == NULL
+
+    def get_stmt_cache(self):
+        return len(self.stmt_available), len(self.stmt_in_use)
 
     def __enter__(self):
         if not self.db:
@@ -344,6 +349,10 @@ cdef class Connection(_callable_context_manager):
         dest.connect()
         self.backup(dest, pages, name, progress, src_name)
         dest.close()
+
+    def blob_open(self, table, column, rowid, read_only=False):
+        check_connection(self)
+        return Blob(self, table, column, rowid, read_only)
 
     def load_extension(self, name):
         check_connection(self)
@@ -876,7 +885,7 @@ cdef class Transaction(_callable_context_manager):
                 # If there are still more transactions on the stack, then we
                 # will begin a new transaction.
                 self.rollback(not is_bottom)
-            elif is_bottom:
+            elif is_bottom and not sqlite3_get_autocommit(self.conn.db):
                 try:
                     self.commit(False)
                 except:
@@ -1036,11 +1045,17 @@ cdef class Statement(object):
             row = self.get_row_data()
             self.step_status = sqlite3_step(self.st)
         elif self.step_status == SQLITE_DONE:
-            #self.reset()
+            self.reset()
             raise StopIteration
         else:
             raise_sqlite_error(self.conn.db, 'error executing query: ')
         return row
+
+    def fetchone(self):
+        return next(self)
+
+    def value(self):
+        return next(self)[0]
 
     def execute(self):
         if self.step_status != -1:
@@ -1049,6 +1064,7 @@ cdef class Statement(object):
         self.step_status = sqlite3_step(self.st)
         if self.step_status == SQLITE_DONE:
             self.reset()
+            return iter(())
         elif self.step_status == SQLITE_ROW:
             return self
         else:
@@ -1173,7 +1189,7 @@ cdef class Blob(object):
 
         if rc != SQLITE_OK:
             raise SqliteError('Unable to open blob "%s"."%s" row %s.' %
-                              table, column, rowid)
+                              (table, column, rowid))
         if blob == NULL:
             raise MemoryError('Unable to allocate blob.')
 
@@ -1193,6 +1209,7 @@ cdef class Blob(object):
         return sqlite3_blob_bytes(self.blob)
 
     def read(self, n=None):
+        _check_blob_closed(self)
         cdef:
             bytes pybuf
             int length = -1
@@ -1202,7 +1219,6 @@ cdef class Blob(object):
         if n is not None:
             length = n
 
-        _check_blob_closed(self)
         size = sqlite3_blob_bytes(self.blob)
         if self.offset == size or length == 0:
             return b''
@@ -1223,8 +1239,8 @@ cdef class Blob(object):
         return pybuf
 
     def seek(self, offset, frame_of_reference=0):
-        cdef int size
         _check_blob_closed(self)
+        cdef int size
         size = sqlite3_blob_bytes(self.blob)
         if frame_of_reference == 0:
             if offset < 0 or offset > size:
@@ -1246,13 +1262,13 @@ cdef class Blob(object):
         return self.offset
 
     def write(self, data):
+        _check_blob_closed(self)
         cdef:
             bytes bdata = encode(data)
             char *buf
             int n, size
             Py_ssize_t buflen
 
-        _check_blob_closed(self)
         size = sqlite3_blob_bytes(self.blob)
         PyBytes_AsStringAndSize(bdata, &buf, &buflen)
         n = <int>buflen
