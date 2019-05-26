@@ -273,6 +273,33 @@ cdef class Connection(_callable_context_manager):
             raise_sqlite_error(self.db, 'error requesting db status: ')
         return (current, highwater)
 
+    def table_column_metadata(self, table, column, database=None):
+        check_connection(self)
+        cdef:
+            bytes btable = encode(table)
+            bytes bcolumn = encode(column)
+            bytes bdatabase
+            char *zdatabase = NULL
+            char *data_type
+            char *coll_seq
+            int not_null, primary_key, auto_increment
+            int rc
+
+        if database:
+            bdatabase = encode(database)
+            zdatabase = bdatabase
+
+        rc = sqlite3_table_column_metadata(self.db, zdatabase, btable, bcolumn,
+                                           <const char **>&data_type,
+                                           <const char **>&coll_seq,
+                                           &not_null, &primary_key,
+                                           &auto_increment)
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error getting column metadata: ')
+
+        return (table, column, decode(data_type), decode(coll_seq), not_null,
+                primary_key, auto_increment)
+
     def transaction(self, lock=None):
         check_connection(self)
         return Transaction(self, lock)

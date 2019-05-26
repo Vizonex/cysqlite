@@ -308,6 +308,14 @@ class TestQueryExecution(BaseTestCase):
         self.db.set_foreign_keys(0)
         self.assertEqual(self.db.get_foreign_keys(), 0)
 
+    def test_table_column_metadata(self):
+        self.assertEqual(self.db.table_column_metadata('kv', 'id'), (
+            'kv', 'id', 'integer', 'BINARY', 1, 1, 0))
+        self.assertEqual(self.db.table_column_metadata('kv', 'key'), (
+            'kv', 'key', 'text', 'BINARY', 1, 0, 0))
+        self.assertEqual(self.db.table_column_metadata('kv', 'extra'), (
+            'kv', 'extra', 'integer', 'BINARY', 0, 0, 0))
+
 
 class TestSmallCache(BaseTestCase):
     def get_connection(self, **kwargs):
