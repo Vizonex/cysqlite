@@ -153,6 +153,7 @@ class TestQueryExecution(BaseTestCase):
             ('k3', 30, 233), ('k3', 101, 233), ('k3', 102, 233),
             ('k4', 1337, 1337)])
 
+    @unittest.skipIf(sys.version_info[0] == 2, 'flaky on py2')
     def test_create_collation(self):
         def case_insensitive(s1, s2):
             s1 = s1.lower()
@@ -293,7 +294,7 @@ class TestQueryExecution(BaseTestCase):
         self.assertEqual(accum, [('k1', 'v1x'), ('k2', 'v2b'), ('k3', 'v3z')])
 
         self.db.execute_simple('delete from kv where extra < 30')
-        accum.clear()
+        del accum[:]
         self.db.execute_simple('select key, value from kv order by key', cb)
         self.assertEqual(accum, [('k3', 'v3z')])
 
