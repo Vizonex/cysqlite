@@ -41,7 +41,7 @@ cdef class Savepoint(object)
 cdef class Blob(object)
 
 # TODO:
-# - table_column_metadata / introspection.
+# - introspection.
 
 
 cdef raise_sqlite_error(sqlite3 *db, unicode msg):
@@ -557,6 +557,38 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting authorizer: ')
 
+    def trace(self, fn, mask=2):
+        check_connection(self)
+        cdef:
+            _Callback callback
+            int rc
+
+        if fn is None:
+            self._trace_hook = None
+            rc = sqlite3_trace_v2(self.db, 0, NULL, NULL)
+        else:
+            callback = _Callback.__new__(_Callback, self, fn)
+            self._trace_hook = callback
+            rc = sqlite3_trace_v2(self.db, mask, _trace_cb, <void *>callback)
+
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self.db, 'error setting trace: ')
+
+    def progress(self, fn, n=1):
+        check_connection(self)
+        cdef:
+            _Callback callback
+            int rc
+
+        if fn is None:
+            self._progress_hook = None
+            sqlite3_progress_handler(self.db, 0, NULL, NULL)
+        else:
+            callback = _Callback.__new__(_Callback, self, fn)
+            self._progress_hook = callback
+            sqlite3_progress_handler(self.db, n, _progress_cb,
+                                     <void *>callback)
+
     def set_busy_handler(self, timeout=5):
         check_connection(self)
         cdef sqlite3_int64 n = timeout * 1000
@@ -870,9 +902,13 @@ TRACE_ROW = 0x04
 TRACE_CLOSE = 0x08
 
 
-cdef int _trace_cb(unsigned mask, void *data, void *p, void *x) with gil:
+cdef int _trace_cb(unsigned event, void *data, void *p, void *x) with gil:
     cdef:
         _Callback cb = <_Callback>data
+        bytes bsql
+        long long sid = -1
+        int64_t ns = -1
+        unicode sql = None
     # Integer return value is currently ignored, but this may change in future
     # versions of sqlite3.
     # TRACE_STMT invoked when a prepared stmt first begins running. P is a
@@ -883,14 +919,32 @@ cdef int _trace_cb(unsigned mask, void *data, void *p, void *x) with gil:
     # is a pointer to the statement, X is unused.
     # TRACE_CLOSE is invoked when a database connection closes. P is a pointer
     # to the db conn, X is unused.
-    pass
+    if event != TRACE_CLOSE:
+        sid = <long long>p  # Memory address of statement.
+    if event == TRACE_STMT:
+        bsql = <bytes>(<char *>x)
+        sql = decode(bsql)
+    elif event == TRACE_PROFILE:
+        ns = (<int64_t *>x)[0]
+
+    try:
+        cb.fn(event, sid, sql, ns)
+    except Exception as exc:
+        traceback.print_exc()
+        return SQLITE_ERROR
+
+    return SQLITE_OK
 
 
 cdef int _progress_cb(void *data) with gil:
-    cdef:
-        _Callback cb = <_Callback>data
+    cdef _Callback cb = <_Callback>data
     # If returns non-zero, the operation is interrupted.
-    pass
+    try:
+        ret = cb.fn() or 0
+    except Exception as exc:
+        traceback.print_exc()
+        ret = SQLITE_OK
+    return <int>ret
 
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) with gil:
