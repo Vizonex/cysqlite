@@ -186,7 +186,6 @@ conn.execute('insert into kv (key, value) values (?, ?), (?, ?), (?, ?)',
 
 curs = conn.execute('select * from kv order by value collate rev')
 print(curs.description())
-print(curs.details())
 for row in curs:
     print(row)
 
