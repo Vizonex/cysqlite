@@ -733,5 +733,40 @@ class TestTableFunction(BaseTestCase):
         self.assertEqual(list(curs), [(0,), (1,), (2,)])
 
 
+class TestRankUDFs(BaseTestCase):
+    filename = ':memory:'
+    test_data = (
+        ('A faith is a necessity to a man. Woe to him who believes in '
+         'nothing.'),
+        ('All who call on God in true faith, earnestly from the heart, will '
+         'certainly be heard, and will receive what they have asked and '
+         'desired.'),
+        ('Be faithful in small things because it is in them that your '
+         'strength lies.'),
+        ('Faith consists in believing when it is beyond the power of reason '
+         'to believe.'),
+        ('Faith has to do with things that are not seen and hope with things '
+         'that are not at hand.'))
+
+    def setUp(self):
+        super(TestRankUDFs, self).setUp()
+        self.db.execute('create virtual table search using fts4 (content)')
+        for i, s in enumerate(self.test_data):
+            self.db.execute('insert into search (docid, content) values (?,?)',
+                            (i + 1, s))
+        self.db.create_function(rank_bm25, 'rank_bm25')
+
+    def assertSearch(self, q, expected):
+        curs = self.db.execute('select docid, '
+                               'rank_bm25(matchinfo(search, ?), 1) AS r '
+                               'from search where search match ? '
+                               'order by r', ('pcnalx', q))
+        results = [(docid, round(score, 2)) for docid, score in curs]
+        self.assertEqual(results, expected)
+
+    def test_scoring(self):
+        self.assertSearch('things', [(5, -0.45), (3, -0.36)])
+
+
 if __name__ == '__main__':
     unittest.main(argv=sys.argv)
