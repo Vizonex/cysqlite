@@ -195,6 +195,8 @@ cdef class Connection(_callable_context_manager):
     cdef Statement prepare(self, sql, params=None):
         cdef Statement st = self.stmt_get(sql)
         if params:
+            if not isinstance(params, tuple):
+                params = tuple(params)
             st.bind(params)
         return st
 
@@ -2140,6 +2142,7 @@ cdef class median(object):
             return self.items[0]
         else:
             return self.selectKth(self.ct // 2)
+    value = finalize
 
 
 cdef int _aggressive_busy_handler(void *ptr, int n) nogil:

@@ -855,5 +855,74 @@ class TestStringDistanceUDFs(BaseTestCase):
             self.assertDLev(s2, s1, n)
 
 
+class TestMedianUDF(BaseTestCase):
+    database = ':memory:'
+
+    def setUp(self):
+        super(TestMedianUDF, self).setUp()
+        self.db.execute('create table g(id integer not null primary key, '
+                        'x not null, k)')
+        self.db.create_aggregate(median, 'median', 1)
+        self.db.create_window_function(median, 'median', 1)
+
+    def store(self, *values):
+        self.db.execute('delete from g')
+        expr = ', '.join('(?)' for _ in values)
+        self.db.execute('insert into g(x) values %s' % expr, values)
+
+    def assertMedian(self, expected):
+        curs = self.db.execute('select median(x) from g')
+        row, = list(curs)
+        self.assertEqual(row[0], expected)
+
+    def test_median_aggregate(self):
+        self.assertMedian(None)
+        self.store(1)
+        self.assertMedian(1)
+        self.store(3, 1, 6, 6, 6, 7, 7, 7, 7, 12, 12, 17)
+        self.assertMedian(7)
+        self.store(9, 2, 2, 3, 3, 1)
+        self.assertMedian(3)
+        self.store(4, 4, 1, 8, 2, 2, 5, 8, 1)
+        self.assertMedian(4)
+        self.store(1, 10000, 10)
+        self.assertMedian(10)
+
+    def storek(self, data):
+        self.db.execute('delete from g')
+        expr = []
+        values = []
+        for key, vals in data.items():
+            for val in vals:
+                expr.append('(?, ?)')
+                values.extend((key, val))
+
+        self.db.execute('insert into g(k, x) values %s' % ', '.join(expr),
+                        values)
+
+    def assertMedianW(self, expected):
+        curs = self.db.execute('select k, x, median(x) over (partition by k) '
+                               'from g order by k, id')
+        self.assertEqual(list(curs), expected)
+
+    def test_median_window(self):
+        self.assertMedianW([])
+        self.storek({'k1': [1]})
+        self.assertMedianW([('k1', 1, 1)])
+
+        self.storek({
+            'k1': [3, 6, 6, 7, 7, 7, 17],
+            'k2': [9, 2, 3, 1],
+            'k3': [4, 4, 8, 2, 2, 8, 1],
+            'k4': [1, 10000, 10]})
+        self.assertMedianW([
+            ('k1', 3, 7), ('k1', 6, 7), ('k1', 6, 7), ('k1', 7, 7),
+            ('k1', 7, 7), ('k1', 7, 7), ('k1', 17, 7),
+            ('k2', 9, 3), ('k2', 2, 3), ('k2', 3, 3), ('k2', 1, 3),
+            ('k3', 4, 4), ('k3', 4, 4), ('k3', 8, 4), ('k3', 2, 4),
+            ('k3', 2, 4), ('k3', 8, 4), ('k3', 1, 4),
+            ('k4', 1, 10), ('k4', 10000, 10), ('k4', 10, 10)])
+
+
 if __name__ == '__main__':
     unittest.main(argv=sys.argv)
