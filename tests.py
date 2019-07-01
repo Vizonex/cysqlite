@@ -40,6 +40,28 @@ class BaseTestCase(unittest.TestCase):
                             'values (?, ?, ?)', row)
 
 
+class TestOpenConnection(unittest.TestCase):
+    def tearDown(self):
+        for filename in glob.glob('/tmp/cysqlite-*'):
+            if os.path.isfile(filename):
+                os.unlink(filename)
+
+    def assertDB(self, filename, expected):
+        conn = Connection(filename)
+        with conn:
+            row = conn.execute_one('pragma database_list;')
+            self.assertEqual(row[2], expected)
+
+    def test_database_open(self):
+        self.assertDB(':memory:', '')
+        self.assertDB('/tmp/cysqlite-test.db', '/tmp/cysqlite-test.db')
+        self.assertDB('file:///tmp/cysqlite-test.db', '/tmp/cysqlite-test.db')
+        self.assertDB('file:///tmp/cysqlite-test.db?mode=ro',
+                      '/tmp/cysqlite-test.db')
+        self.assertDB('file:///tmp/cysqlite-test.db?mode=ro&cache=private',
+                      '/tmp/cysqlite-test.db')
+
+
 class TestCheckConnection(BaseTestCase):
     filename = ':memory:'
 
