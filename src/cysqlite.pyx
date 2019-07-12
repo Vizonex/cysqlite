@@ -1182,6 +1182,9 @@ cdef class Statement(object):
     def fetchone(self):
         return next(self)
 
+    def fetchall(self):
+        return list(self)
+
     def value(self):
         return next(self)[0]
 
