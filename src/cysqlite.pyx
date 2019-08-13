@@ -89,12 +89,12 @@ cdef class Connection(_callable_context_manager):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
+        self.vfs = vfs
         self.uri = uri
         self.extensions = extensions
-        self.vfs = vfs
         self.cached_statements = cached_statements
-        self.db = NULL
 
+        self.db = NULL
         self.functions = {}
         self.stmt_available = {}
         self.stmt_in_use = {}
