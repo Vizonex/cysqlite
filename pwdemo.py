@@ -67,8 +67,8 @@ class CySqliteDatabase(SqliteDatabase):
             conn.create_collation(fn, name)
 
     def _load_functions(self, conn):
-        for name, (fn, num_params) in self._functions.items():
-            conn.create_function(fn, name, num_params)
+        for name, (fn, num_params, deterministic) in self._functions.items():
+            conn.create_function(fn, name, num_params, deterministic)
 
     def _load_window_functions(self, conn):
         for name, (klass, num_params) in self._window_functions.items():
@@ -103,7 +103,7 @@ class CySqliteDatabase(SqliteDatabase):
     def rollback(self):
         self.connection().rollback()
 
-    def execute_sql(self, sql, params=None, commit=True):
+    def execute_sql(self, sql, params=None):
         logger.debug((sql, params))
         with __exception_wrapper__:
             conn = self.connection()
