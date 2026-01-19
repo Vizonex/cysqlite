@@ -1629,7 +1629,7 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
         int nParams = len(table_func_cls.params)
 
     for i in range(pIdxInfo.nConstraint):
-        pConstraint = pIdxInfo.aConstraint + i
+        pConstraint = <sqlite3_index_constraint *>pIdxInfo.aConstraint + i
         if not pConstraint.usable:
             continue
         if pConstraint.op != SQLITE_INDEX_CONSTRAINT_EQ:
