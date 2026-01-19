@@ -112,6 +112,30 @@ cdef class Connection(_callable_context_manager):
             raise SqliteError('cannot close database while a transaction is '
                               'open.')
 
+        if self._trace_hook is not None:
+            sqlite3_trace_v2(self.db, 0, NULL, NULL)
+            self._trace_hook = None
+
+        if self._commit_hook is not None:
+            sqlite3_commit_hook(self.db, NULL, NULL)
+            self._commit_hook = None
+
+        if self._rollback_hook is not None:
+            sqlite3_rollback_hook(self.db, NULL, NULL)
+            self._rollback_hook = None
+
+        if self._update_hook is not None:
+            sqlite3_update_hook(self.db, NULL, NULL)
+            self._update_hook = None
+
+        if self._auth_hook is not None:
+            sqlite3_set_authorizer(self.db, NULL, NULL)
+            self._auth_hook = None
+
+        if self._progress_hook is not None:
+            sqlite3_progress_handler(self.db, 0, NULL, NULL)
+            self._progress_hook = None
+
         # Drop references to user-defined functions.
         self.functions = {}
 
@@ -119,24 +143,9 @@ cdef class Connection(_callable_context_manager):
         self.stmt_available = {}
         self.stmt_in_use = {}
 
-        # Clear hooks.
-        self._commit_hook = None
-        self._rollback_hook = None
-        self._update_hook = None
-
-        # Clear authorizer and progress handler.
-        self._auth_hook = None
-        self._progress_hook = None
-
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
             raise SqliteError('error closing database: %s' % rc)
-
-        # Clear the trace hook after closing the DB, since a trace may be sent
-        # upon the DB being closed.
-        if self._trace_hook is not None:
-            sqlite3_trace_v2(self.db, 0, NULL, NULL)
-            self._trace_hook = None
 
         self.db = NULL
         return True
@@ -725,13 +734,13 @@ cdef class Statement(object):
                 PyBytes_AsStringAndSize(tmp, &buf, &nbytes)
                 rc = sqlite3_bind_text64(self.st, i + 1, buf,
                                          <sqlite3_uint64>nbytes,
-                                         <sqlite3_destructor_type>-1,
+                                         SQLITE_TRANSIENT,
                                          SQLITE_UTF8)
             elif isinstance(param, bytes):
                 PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
                 rc = sqlite3_bind_blob64(self.st, i + 1, <void *>buf,
                                          <sqlite3_uint64>nbytes,
-                                         <sqlite3_destructor_type>-1)
+                                         SQLITE_TRANSIENT)
 
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.conn.db, 'error binding parameter: ')
@@ -740,8 +749,9 @@ cdef class Statement(object):
         if self.st == NULL:
             return 0
         self.step_status = -1
+        cdef int rc = sqlite3_reset(self.st)
         self.conn.stmt_release(self)
-        if sqlite3_reset(self.st) != SQLITE_OK:
+        if rc != SQLITE_OK:
             raise_sqlite_error(self.conn.db, 'error resetting statement: ')
 
     def close(self):
@@ -787,7 +797,7 @@ cdef class Statement(object):
         self.step_status = sqlite3_step(self.st)
         if self.step_status == SQLITE_DONE:
             self.reset()
-            return iter(())
+            return self
         elif self.step_status == SQLITE_ROW:
             return self
         else:
@@ -893,7 +903,7 @@ cdef object get_aggregate(sqlite3_context *ctx):
         aggregate_ctx *agg_ctx = <aggregate_ctx *>sqlite3_aggregate_context(ctx, sizeof(aggregate_ctx))
 
     if agg_ctx.in_use:
-        return <object>agg_ctx.agg
+        return <object>agg_ctx.agg  # Borrowed.
 
     cdef _Callback cb = <_Callback>sqlite3_user_data(ctx)
     try:
@@ -904,7 +914,7 @@ cdef object get_aggregate(sqlite3_context *ctx):
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
         return
 
-    Py_INCREF(agg)
+    Py_INCREF(agg)  # Owned.
     agg_ctx.in_use = 1
     agg_ctx.agg = <PyObject *>agg
     return agg
@@ -925,7 +935,13 @@ cdef void _step_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcep
 
 
 cdef void _finalize_cb(sqlite3_context *ctx) noexcept with gil:
-    agg = get_aggregate(ctx)
+    cdef aggregate_ctx *agg_ctx = <aggregate_ctx *>sqlite3_aggregate_context(ctx, 0)
+
+    if not agg_ctx or not agg_ctx.in_use:
+        sqlite3_result_null(ctx)
+        return
+
+    agg = <object>agg_ctx.agg
     try:
         result = agg.finalize()
     except Exception as exc:
@@ -935,7 +951,9 @@ cdef void _finalize_cb(sqlite3_context *ctx) noexcept with gil:
     else:
         python_to_sqlite(ctx, result)
 
-    Py_DECREF(agg)
+    Py_DECREF(agg)  # Match incref.
+    agg_ctx.in_use = 0
+    agg_ctx.agg = NULL
 
 
 cdef void _value_cb(sqlite3_context *ctx) noexcept with gil:
@@ -1852,13 +1870,13 @@ cdef python_to_sqlite(sqlite3_context *context, param):
         PyBytes_AsStringAndSize(tmp, &buf, &nbytes)
         sqlite3_result_text64(context, buf,
                               <sqlite3_uint64>nbytes,
-                              <sqlite3_destructor_type>-1,
+                              SQLITE_TRANSIENT,
                               SQLITE_UTF8)
     elif isinstance(param, bytes):
         PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
         sqlite3_result_blob64(context, <void *>buf,
                               <sqlite3_uint64>nbytes,
-                              <sqlite3_destructor_type>-1)
+                              SQLITE_TRANSIENT)
     else:
         sqlite3_result_error(
             context,

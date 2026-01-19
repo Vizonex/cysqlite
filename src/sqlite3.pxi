@@ -213,6 +213,7 @@ cdef extern from "sqlite3.h" nogil:
     cdef int SQLITE_DETERMINISTIC
 
     ctypedef void (*sqlite3_destructor_type)(void*)
+    cdef sqlite3_destructor_type SQLITE_TRANSIENT
 
     cdef int SQLITE_INDEX_SCAN_UNIQUE  # Scan visits at most 1 row
     cdef int SQLITE_INDEX_CONSTRAINT_EQ
