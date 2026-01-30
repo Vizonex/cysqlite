@@ -1,6 +1,7 @@
 import hashlib
 
 from cysqlite import Connection
+from cysqlite import TableFunction
 
 from peewee import __exception_wrapper__
 from peewee import logger
@@ -118,6 +119,12 @@ with db.atomic() as tx:
     with db.atomic() as sp2:
         for i in range(4):
             Tweet.create(user=u1, content='u1-t%d' % i)
+        try:
+            with db.atomic() as sp3:
+                Tweet.create(user=u2, content='u2-t1')
+                raise ValueError('asdf')
+        except ValueError:
+            pass
 
 query = User.select().order_by(User.username)
 assert [u.username for u in query] == ['u1', 'u2']
@@ -125,3 +132,29 @@ assert [u.username for u in query] == ['u1', 'u2']
 query = Tweet.select(Tweet, User, fn.md5(User.username).alias('hsh')).join(User).order_by(User.username, Tweet.id)
 for tweet in query:
     print(tweet.user.username, tweet.timestamp, tweet.content, tweet.hsh)
+
+@db.table_function('series')
+class Series(TableFunction):
+    columns = ['value']
+    params = ['start', 'stop', 'step']
+    name = 'series'
+
+    def initialize(self, start=0, stop=None, step=1):
+        self.start = start
+        self.stop = stop or float('inf')
+        self.step = step
+        self.curr = self.start
+
+    def iterate(self, idx):
+        if self.curr > self.stop:
+            raise StopIteration
+
+        ret = self.curr
+        self.curr += self.step
+        return (ret,)
+
+for i in range(10):
+    db.close()
+    db.connect()
+    accum = [row[0] for row in db.execute_sql('select * from series(1, 10)')]
+    assert accum == list(range(1, 11))
