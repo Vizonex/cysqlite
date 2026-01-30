@@ -29,6 +29,7 @@ from collections import namedtuple
 from random import randint
 import traceback
 import uuid
+import weakref
 
 from src.cysqlite cimport *
 
@@ -134,7 +135,7 @@ cdef class Connection(_callable_context_manager):
         # List of statements, transactions, savepoints, blob handles?
         dict functions
         dict stmt_available  # sql -> Statement.
-        dict stmt_in_use  # id(stmt) -> Statement.
+        object stmt_in_use  # id(stmt) -> Statement.
         int _transaction_depth
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
         _Callback _trace_hook, _progress_hook
@@ -155,7 +156,7 @@ cdef class Connection(_callable_context_manager):
         self.db = NULL
         self.functions = {}
         self.stmt_available = {}
-        self.stmt_in_use = {}
+        self.stmt_in_use = weakref.WeakValueDictionary()
         self._transaction_depth = 0
 
     def __dealloc__(self):
@@ -198,8 +199,8 @@ cdef class Connection(_callable_context_manager):
         self.functions = {}
 
         # When the statements are deallocated, they will be finalized.
-        self.stmt_available = {}
-        self.stmt_in_use = {}
+        self.stmt_available.clear()
+        self.stmt_in_use.clear()
 
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
@@ -288,7 +289,7 @@ cdef class Connection(_callable_context_manager):
         # remove a random key, which is also fine.
         while len(self.stmt_available) > self.cached_statements:
             first_key = next(iter(self.stmt_available))
-            self.stmt_available.pop(first_key)
+            st = self.stmt_available.pop(first_key)
 
     def execute(self, sql, params=None):
         check_connection(self)
@@ -299,6 +300,8 @@ cdef class Connection(_callable_context_manager):
         cdef Statement st = self.execute(sql, params)
         try:
             return next(st)
+        except StopIteration:
+            return
         finally:
             st.reset()
 
@@ -745,6 +748,7 @@ cdef class Statement(object):
         int step_status
         object row_data
         tuple _description
+        object __weakref__
 
     def __init__(self, Connection conn, sql):
         self.conn = conn
@@ -846,6 +850,7 @@ cdef class Statement(object):
             self.reset()
             raise StopIteration
         else:
+            self.reset()
             raise_sqlite_error(self.conn.db, 'error executing query: ')
         return row
 
@@ -874,6 +879,7 @@ cdef class Statement(object):
         elif self.step_status == SQLITE_ROW:
             return self
         else:
+            self.reset()
             raise_sqlite_error(self.conn.db, 'error executing query: ')
 
     cdef get_row_data(self):
@@ -901,7 +907,8 @@ cdef class Statement(object):
                     <char *>sqlite3_column_blob(self.st, i),
                     nbytes)
             else:
-                raise SqliteError('error: cannot bind parameter %r' % value)
+                raise SqliteError('error: cannot bind parameter %d: type = %r'
+                                  % (i, coltype))
 
             Py_INCREF(value)
             PyTuple_SET_ITEM(result, i, value)
