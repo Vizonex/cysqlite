@@ -239,7 +239,8 @@ cdef class Connection(_callable_context_manager):
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.db, 'error enabling extensions: ')
 
-        rc = sqlite3_busy_timeout(self.db, int(self.timeout * 1000))
+        cdef int timeout = int(self.timeout * 1000)
+        rc = sqlite3_busy_timeout(self.db, timeout)
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting busy timeout: ')
 
@@ -810,6 +811,8 @@ cdef class Statement(object):
                                          SQLITE_TRANSIENT,
                                          SQLITE_UTF8)
             elif isinstance(param, (bytes, bytearray, memoryview)):
+                if isinstance(param, (bytearray, memoryview)):
+                    param = bytes(param)
                 PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
                 rc = sqlite3_bind_blob64(self.st, i + 1, <void *>buf,
                                          <sqlite3_uint64>nbytes,
@@ -834,6 +837,7 @@ cdef class Statement(object):
         if self.st == NULL:
             return 0
         self.step_status = -1
+        self._description = None
         cdef int rc = sqlite3_reset(self.st)
         sqlite3_clear_bindings(self.st)
         self.conn.stmt_release(self)
@@ -868,7 +872,10 @@ cdef class Statement(object):
         return row
 
     def fetchone(self):
-        return next(self)
+        try:
+            return next(self)
+        except StopIteration:
+            return
 
     def fetchall(self):
         return list(self)
