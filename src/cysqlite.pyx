@@ -128,7 +128,7 @@ cdef class Connection(_callable_context_manager):
         public bint uri
         public int cached_statements
         public int flags
-        public int timeout
+        public float timeout
         public str database
         public str vfs
         bint check_same_thread
@@ -140,7 +140,7 @@ cdef class Connection(_callable_context_manager):
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
         _Callback _trace_hook, _progress_hook
 
-    def __init__(self, database, flags=None, timeout=5000, vfs=None, uri=False,
+    def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
                  extensions=True, cached_statements=100,
                  check_same_thread=True):
         self.database = decode(database)
@@ -238,7 +238,7 @@ cdef class Connection(_callable_context_manager):
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.db, 'error enabling extensions: ')
 
-        rc = sqlite3_busy_timeout(self.db, self.timeout)
+        rc = sqlite3_busy_timeout(self.db, int(self.timeout * 1000))
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting busy timeout: ')
 
@@ -671,9 +671,10 @@ cdef class Connection(_callable_context_manager):
             sqlite3_progress_handler(self.db, n, _progress_cb,
                                      <void *>callback)
 
-    def set_busy_handler(self, timeout=5):
+    def set_busy_handler(self, timeout=5.0):
         check_connection(self)
-        cdef sqlite3_int64 n = timeout * 1000
+        self.timeout = timeout
+        cdef sqlite3_int64 n = int(self.timeout * 1000)
         sqlite3_busy_handler(self.db, _aggressive_busy_handler, <void *>n)
 
     def set_main_db_name(self, name):
@@ -1870,14 +1871,11 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
                             for i in sqlite_version.split('.'))
 
 
-def connect(database, flags=None, timeout=5000, vfs=None, uri=False,
+def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
             extensions=True, cached_statements=100, check_same_thread=True,
             factory=None):
     """Open a connection to an SQLite database."""
     factory = factory or Connection
-    if timeout <= 60:
-        timeout = int(timeout * 1000)
-
     conn = factory(database,
                    flags=flags,
                    timeout=timeout,

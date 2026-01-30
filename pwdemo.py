@@ -10,7 +10,7 @@ from peewee import *
 
 class CySqliteDatabase(SqliteDatabase):
     def _connect(self):
-        conn = Connection(self.database, timeout=self._timeout * 1000,
+        conn = Connection(self.database, timeout=self._timeout,
                           extensions=True, **self.connect_params)
         conn.connect()
         try:
@@ -27,21 +27,6 @@ class CySqliteDatabase(SqliteDatabase):
     def _attach_databases(self, conn):
         for name, db in self._attached.items():
             conn.execute_one('ATTACH DATABASE "%s" AS "%s"' % (db, name))
-
-    @property
-    def timeout(self):
-        return self._timeout
-
-    @timeout.setter
-    def timeout(self, seconds):
-        if self._timeout == seconds:
-            return
-
-        self._timeout = seconds
-        if not self.is_closed():
-            # pysqlite multiplies the user timeout by 1000, but the unit of the
-            # pragma is actually milliseconds.
-            self.execute_sql('PRAGMA busy_timeout=%d;' % (seconds * 1000))
 
     def _load_aggregates(self, conn):
         for name, (klass, num_params) in self._aggregates.items():
