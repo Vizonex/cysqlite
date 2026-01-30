@@ -27,6 +27,7 @@ from libc.string cimport memset
 
 from collections import namedtuple
 from random import randint
+import datetime
 import traceback
 import uuid
 import weakref
@@ -808,11 +809,22 @@ cdef class Statement(object):
                                          <sqlite3_uint64>nbytes,
                                          SQLITE_TRANSIENT,
                                          SQLITE_UTF8)
-            elif isinstance(param, bytes):
+            elif isinstance(param, (bytes, bytearray, memoryview)):
                 PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
                 rc = sqlite3_bind_blob64(self.st, i + 1, <void *>buf,
                                          <sqlite3_uint64>nbytes,
                                          SQLITE_TRANSIENT)
+            else:
+                if isinstance(param, (datetime.datetime, datetime.date)):
+                    param = str(param)
+                else:
+                    param = str(param)
+                tmp = PyUnicode_AsUTF8String(param)
+                PyBytes_AsStringAndSize(tmp, &buf, &nbytes)
+                rc = sqlite3_bind_text64(self.st, i + 1, buf,
+                                         <sqlite3_uint64>nbytes,
+                                         SQLITE_TRANSIENT,
+                                         SQLITE_UTF8)
 
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.conn.db, 'error binding parameter: ')
