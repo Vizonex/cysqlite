@@ -887,6 +887,9 @@ cdef class Statement(object):
             int i = 1, rc = 0
             Py_ssize_t nbytes
 
+        # Clear any existing bindings.
+        sqlite3_clear_bindings(self.st)
+
         pc = sqlite3_bind_parameter_count(self.st)
         if pc != len(params):
             raise SqliteError('error: %s parameters required' % pc)
@@ -939,7 +942,6 @@ cdef class Statement(object):
 
         self.step_status = -1
         cdef int rc = sqlite3_reset(self.st)
-        #sqlite3_clear_bindings(self.st)
 
         if rc != SQLITE_OK:
             raise_sqlite_error(self.conn.db, 'error resetting statement: ')
