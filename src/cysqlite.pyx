@@ -141,7 +141,6 @@ cdef class Connection(_callable_context_manager):
         uintptr_t thread_ident
         public bint extensions
         public bint uri
-        public int cached_statements
         public int flags
         public float timeout
         public str database
@@ -149,28 +148,24 @@ cdef class Connection(_callable_context_manager):
         bint check_same_thread
         # List of statements, transactions, savepoints, blob handles?
         dict functions
-        dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
         int _transaction_depth
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
         _Callback _trace_hook, _progress_hook
 
     def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
-                 extensions=True, cached_statements=100,
-                 check_same_thread=True, autoconnect=False):
+                 extensions=True, check_same_thread=True, autoconnect=False):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
         self.vfs = vfs
         self.uri = uri
         self.extensions = extensions
-        self.cached_statements = cached_statements
         self.check_same_thread = check_same_thread
         self.thread_ident = PyThread_get_thread_ident()
 
         self.db = NULL
         self.functions = {}
-        self.stmt_available = {}
         self.stmt_in_use = weakref.WeakValueDictionary()
         self._transaction_depth = 0
 
@@ -182,12 +177,9 @@ cdef class Connection(_callable_context_manager):
             self.db = NULL
 
     def finalize_statements(self, finalize=True):
-        for stmt in list(self.stmt_available.values()):
-            stmt.finalize()
-        for stmt in list(self.stmt_in_use.values()):
+        for stmt in self.stmt_in_use.values():
             stmt.finalize()
 
-        self.stmt_available.clear()
         self.stmt_in_use.clear()
 
     def close(self):
@@ -277,8 +269,8 @@ cdef class Connection(_callable_context_manager):
     cpdef is_closed(self):
         return self.db == NULL
 
-    def get_stmt_cache(self):
-        return len(self.stmt_available), len(self.stmt_in_use)
+    def get_stmt_usage(self):
+        return len(self.stmt_in_use)
 
     def __enter__(self):
         if not self.db:
@@ -300,26 +292,9 @@ cdef class Connection(_callable_context_manager):
         cdef:
             bytes bsql = encode(sql)
             Statement st
-
-        if bsql in self.stmt_available:
-            st = self.stmt_available.pop(bsql)
-        else:
-            st = Statement(self, bsql)
-
+        st = Statement(self, bsql)
         self.stmt_in_use[id(st)] = st
         return st
-
-    cdef stmt_release(self, Statement st):
-        if id(st) in self.stmt_in_use:
-            del self.stmt_in_use[id(st)]
-        self.stmt_available[st.sql] = st
-
-        # Remove oldest statement from the cache - relies on Python 3.6
-        # dictionary retaining insertion order. For older python, will simply
-        # remove a random key, which is also fine.
-        while len(self.stmt_available) > self.cached_statements:
-            first_key = next(iter(self.stmt_available))
-            st = self.stmt_available.pop(first_key)
 
     def execute(self, sql, params=None):
         check_connection(self)
@@ -948,7 +923,6 @@ cdef class Statement(object):
         self.step_status = -1
         cdef int rc = sqlite3_reset(self.st)
         sqlite3_clear_bindings(self.st)
-        self.conn.stmt_release(self)
 
         if rc != SQLITE_OK:
             raise_sqlite_error(self.conn.db, 'error resetting statement: ')
@@ -982,7 +956,10 @@ cdef class Statement(object):
             self.reset()
             raise StopIteration
         else:
-            self.reset()
+            try:
+                self.reset()
+            except Exception:
+                pass  # Ignore errors resetting.
             raise_sqlite_error(self.conn.db, 'error executing query: ')
         return row
 
@@ -1007,12 +984,6 @@ cdef class Statement(object):
         check_connection(self.conn)
         check_statement(self)
 
-        # Ensure statement is not recycled. For example, the statement was
-        # executed (moved to in-use), then consumed (reset, moved back to
-        # available), then the user executes it again. This ensures it is not
-        # moved back to available.
-        self.conn.stmt_available.pop(self.sql, None)
-
         if self.step_status != -1:
             self.reset()
 
@@ -1024,7 +995,10 @@ cdef class Statement(object):
         elif self.step_status == SQLITE_ROW:
             return self
         else:
-            self.reset()
+            try:
+                self.reset()
+            except Exception:
+                pass  # Ignore errors resetting.
             raise_sqlite_error(self.conn.db, 'error executing query: ')
 
     cdef get_row_data(self):
@@ -2018,8 +1992,7 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
 
 
 def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
-            extensions=True, cached_statements=100, check_same_thread=True,
-            autoconnect=True):
+            extensions=True, check_same_thread=True, autoconnect=True):
     """Open a connection to an SQLite database."""
     conn = Connection(database,
                       flags=flags,
@@ -2027,7 +2000,6 @@ def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
                       vfs=vfs,
                       uri=uri,
                       extensions=extensions,
-                      cached_statements=cached_statements,
                       check_same_thread=check_same_thread,
                       autoconnect=autoconnect)
     return conn

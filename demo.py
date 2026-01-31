@@ -65,7 +65,7 @@ print(conn.changes())
 conn.close()
 
 # Test statement cache.
-conn = Connection(':memory:', cached_statements=2)
+conn = Connection(':memory:')
 conn.connect()
 
 conn.execute('create table foo (key text, value text)')
