@@ -922,7 +922,7 @@ cdef class Statement(object):
 
         self.step_status = -1
         cdef int rc = sqlite3_reset(self.st)
-        sqlite3_clear_bindings(self.st)
+        #sqlite3_clear_bindings(self.st)
 
         if rc != SQLITE_OK:
             raise_sqlite_error(self.conn.db, 'error resetting statement: ')
