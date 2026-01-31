@@ -869,7 +869,9 @@ cdef class Statement(object):
     cdef _check_tail(self, const char *tail):
         cdef const char* pos = tail
         while pos[0] != 0:
-            if pos[0] == 32 or pos[0] == 9 or pos[0] == 10 or pos[0] == 13:
+            # Ignore whitespace and semi-colon.
+            if pos[0] == 32 or pos[0] == 9 or pos[0] == 10 or pos[0] == 13 or \
+               pos[0] == 59:
                 pass
             else:
                 return 1
