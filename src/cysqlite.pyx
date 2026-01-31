@@ -118,6 +118,10 @@ cdef inline int check_thread(Connection conn) except -1:
             'SQLite objects created in a thread can only be used in that '
             'same thread')
 
+cdef inline check_statement(Statement stmt):
+    if stmt.st == NULL:
+        raise OperationalError('Statement no longer valid!')
+
 
 ColumnMetadata = namedtuple('ColumnMetadata', (
     'table', 'column', 'datatype', 'collation', 'not_null', 'primary_key',
@@ -177,6 +181,15 @@ cdef class Connection(_callable_context_manager):
         if self.db and sqlite3_close_v2(self.db) == SQLITE_OK:
             self.db = NULL
 
+    def finalize_statements(self, finalize=True):
+        for stmt in list(self.stmt_available.values()):
+            stmt.finalize()
+        for stmt in list(self.stmt_in_use.values()):
+            stmt.finalize()
+
+        self.stmt_available.clear()
+        self.stmt_in_use.clear()
+
     def close(self):
         if not self.db:
             return False
@@ -212,9 +225,9 @@ cdef class Connection(_callable_context_manager):
         # Drop references to user-defined functions.
         self.functions = {}
 
-        # When the statements are deallocated, they will be finalized.
-        self.stmt_available.clear()
-        self.stmt_in_use.clear()
+        # Ensure user references to statements cannot be used after the
+        # connection has been closed.
+        self.finalize_statements()
 
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
@@ -833,6 +846,7 @@ cdef class Connection(_callable_context_manager):
         return (pnLog, pnCkpt)
 
 
+
 cdef class Statement(object):
     cdef:
         readonly Connection conn
@@ -873,6 +887,8 @@ cdef class Statement(object):
 
     cdef bind(self, tuple params):
         check_connection(self.conn)
+        check_statement(self)
+
         cdef:
             bytes tmp
             char *buf
@@ -940,11 +956,18 @@ cdef class Statement(object):
     def close(self):
         self.reset()
 
+    def finalize(self):
+        if self.st != NULL:
+            sqlite3_finalize(self.st)
+        self.st = NULL
+
     def __iter__(self):
         return self
 
     def __next__(self):
         check_connection(self.conn)
+        check_statement(self)
+
         row = None
 
         # Statement has already been consumed and cannot be re-run without
@@ -982,6 +1005,12 @@ cdef class Statement(object):
 
     def execute(self):
         check_connection(self.conn)
+        check_statement(self)
+
+        # Ensure statement is not recycled. For example, the statement was
+        # executed (moved to in-use), then consumed (reset, moved back to
+        # available), then the user executes it again. This ensures it is not
+        # moved back to available.
         self.conn.stmt_available.pop(self.sql, None)
 
         if self.step_status != -1:
@@ -1032,10 +1061,12 @@ cdef class Statement(object):
         return result
 
     def column_count(self):
-        if not self.st: raise SqliteError('statement is not available')
+        check_statement(self)
         return sqlite3_column_count(self.st)
 
     def columns(self):
+        check_statement(self)
+
         cdef:
             bytes col_name
             int col_count, i

@@ -512,6 +512,28 @@ class TestSmallCache(BaseTestCase):
         self.assertTrue(stmt2.fetchone() is None)
         self.assertEqual(self.db.get_stmt_cache(), (3, 0))
 
+    def test_statement_reuse2(self):
+        self.create_table()
+        self.assertEqual(self.db.get_stmt_cache(), (1, 0))
+        self.create_rows(('k1', 'v1', 1))
+        self.create_rows(('k2', 'v2', 2))
+        self.assertEqual(self.db.get_stmt_cache(), (2, 0))
+
+        stmt = self.db.execute('select "key" from kv order by "key"')
+        # Consume stmt, it is returned to available statements.
+        self.assertEqual([row[0] for row in stmt], ['k1', 'k2'])
+
+        # This pulls from available - need to figure out better way of managing
+        # the lifetime.
+        stmt2 = self.db.execute('select "key" from kv order by "key"')
+        self.assertFalse(id(stmt) == id(stmt2))
+
+    def test_statement_after_close(self):
+        stmt = self.db.execute('select 1')
+        self.db.close()
+        self.db.connect()
+        self.assertRaises(OperationalError, stmt.execute)
+
 
 class TestBlob(BaseTestCase):
     def setUp(self):
