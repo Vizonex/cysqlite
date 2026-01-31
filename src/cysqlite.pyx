@@ -928,8 +928,8 @@ cdef class Statement(object):
         check_connection(self.conn)
         if self.st == NULL:
             return 0
+
         self.step_status = -1
-        self._description = None
         cdef int rc = sqlite3_reset(self.st)
         sqlite3_clear_bindings(self.st)
         self.conn.stmt_release(self)
@@ -975,15 +975,19 @@ cdef class Statement(object):
     def value(self):
         try:
             return next(self)[0]
+        except StopIteration:
+            pass
         finally:
             self.reset()
 
     def execute(self):
         check_connection(self.conn)
+        self.conn.stmt_available.pop(self.sql, None)
 
         if self.step_status != -1:
             self.reset()
 
+        self._description = None
         self.step_status = sqlite3_step(self.st)
         if self.step_status == SQLITE_DONE:
             self.reset()

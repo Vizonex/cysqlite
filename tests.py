@@ -88,8 +88,8 @@ class TestExecute(BaseTestCase):
         self.db.execute('create table g (k, v)')
         self.db.execute('insert into g (k, v) values (?, ?), (?, ?), (?, ?)',
                         ('k1', 1, 'k2', 2, 'k3', 3))
-        curs = self.db.execute('select * from g order by v')
-        self.assertEqual(list(curs), [('k1', 1), ('k2', 2), ('k3', 3)])
+        stmt = self.db.execute('select * from g order by v')
+        self.assertEqual(list(stmt), [('k1', 1), ('k2', 2), ('k3', 3)])
 
         row = self.db.execute_one('select * from g where k = ?', ('k2',))
         self.assertEqual(row, ('k2', 2))
@@ -122,16 +122,16 @@ class TestQueryExecution(BaseTestCase):
         self.assertEqual(self.db.total_changes(), 3)
 
         with self.db.atomic():
-            curs = self.db.execute('select * from kv order by key')
-            self.assertEqual([row[1:] for row in curs], self.test_data)
+            stmt = self.db.execute('select * from kv order by key')
+            self.assertEqual([row[1:] for row in stmt], self.test_data)
 
     def test_nested_iteration(self):
-        curs = self.db.execute('select key from kv order by key')
+        stmt = self.db.execute('select key from kv order by key')
         outer = []
         inner = []
-        for key_o, in curs:
+        for key_o, in stmt:
             outer.append(key_o)
-            for key_i, in curs:
+            for key_i, in stmt:
                 inner.append(key_i)
         self.assertEqual(outer, ['k1'])
         self.assertEqual(inner, ['k2', 'k3'])
@@ -151,8 +151,8 @@ class TestQueryExecution(BaseTestCase):
             self.assertFalse(self.db.autocommit())
 
         self.assertTrue(self.db.autocommit())
-        curs = self.db.execute('select key, value, extra from kv order by key')
-        self.assertEqual([row for row in curs], [
+        stmt = self.db.execute('select key, value, extra from kv order by key')
+        self.assertEqual([row for row in stmt], [
             ('k1', 'v1', -10),
             ('k3', 'v3', -30)])
 
@@ -170,8 +170,8 @@ class TestQueryExecution(BaseTestCase):
         self.db.commit()
         self.assertTrue(self.db.autocommit())
 
-        curs = self.db.execute('select key from kv order by key')
-        self.assertEqual([row for row, in curs], ['k1', 'k2', 'k3', 'k5'])
+        stmt = self.db.execute('select key from kv order by key')
+        self.assertEqual([row for row, in stmt], ['k1', 'k2', 'k3', 'k5'])
 
     def test_create_function(self):
         def reverse(s):
@@ -179,9 +179,9 @@ class TestQueryExecution(BaseTestCase):
                 return s[::-1]
 
         self.db.create_function(reverse, 'reverse', 1)
-        curs = self.db.execute('select key, reverse(value) from kv '
+        stmt = self.db.execute('select key, reverse(value) from kv '
                                'order by reverse(value)')
-        self.assertEqual(list(curs), [
+        self.assertEqual(list(stmt), [
             ('k2', 'b2v'),
             ('k1', 'x1v'),
             ('k3', 'z3v')])
@@ -193,8 +193,8 @@ class TestQueryExecution(BaseTestCase):
             def finalize(self): return self.value
 
         self.db.create_aggregate(Sum, 'mysum', 1)
-        curs = self.db.execute('select mysum(extra) from kv')
-        self.assertEqual(curs.fetchone(), (60,))
+        stmt = self.db.execute('select mysum(extra) from kv')
+        self.assertEqual(stmt.fetchone(), (60,))
 
     def test_create_window_function(self):
         class Sum(object):
@@ -213,10 +213,10 @@ class TestQueryExecution(BaseTestCase):
             ('k4', '', 1337))
         self.create_rows(*data)
 
-        curs = self.db.execute('select key, extra, mysum(extra) '
+        stmt = self.db.execute('select key, extra, mysum(extra) '
                                'over (partition by key) from kv '
                                'order by key, extra')
-        self.assertEqual(list(curs), [
+        self.assertEqual(list(stmt), [
             ('k1', 1, 13), ('k1', 2, 13), ('k1', 10, 13),
             ('k2', 11, 43), ('k2', 12, 43), ('k2', 20, 43),
             ('k3', 30, 233), ('k3', 101, 233), ('k3', 102, 233),
@@ -236,9 +236,9 @@ class TestQueryExecution(BaseTestCase):
             ('a1', 'va1', 0), ('Z1', 'za1', 0))
         self.create_rows(*data)
 
-        curs = self.db.execute('select key, value from kv order by '
+        stmt = self.db.execute('select key, value from kv order by '
                                'key collate cic, value collate cic')
-        self.assertEqual(list(curs), [
+        self.assertEqual(list(stmt), [
             ('a1', 'va1'),
             ('k1', 'v1x'), ('K1', 'V1Xx'),
             ('k2', 'v2b'), ('k3', 'v3z'),
@@ -279,12 +279,12 @@ class TestQueryExecution(BaseTestCase):
         self.db.commit_hook(None)
 
     def assertCount(self, n):
-        curs = self.db.execute('select count(*) from kv')
-        self.assertEqual(curs.value(), n)
+        stmt = self.db.execute('select count(*) from kv')
+        self.assertEqual(stmt.value(), n)
 
     def assertKeys(self, expected):
-        curs = self.db.execute('select key from kv order by key')
-        self.assertEqual([k for k, in curs], expected)
+        stmt = self.db.execute('select key from kv order by key')
+        self.assertEqual([k for k, in stmt], expected)
 
     def test_rollback_hook(self):
         state = [0]
@@ -346,8 +346,8 @@ class TestQueryExecution(BaseTestCase):
             (20, 'kv', 'key', 'main', None)])
 
         ret = [AUTH_IGNORE]
-        curs = self.db.execute('select key, value, extra from kv order by id')
-        self.assertEqual(list(curs), [
+        stmt = self.db.execute('select key, value, extra from kv order by id')
+        self.assertEqual(list(stmt), [
             (None, 'v2b', 20),
             (None, 'v3z', 30)])
 
@@ -363,8 +363,8 @@ class TestQueryExecution(BaseTestCase):
             accum.append((code, sql))
 
         self.db.trace(tracer, TRACE_ROW | TRACE_STMT)
-        curs = self.db.execute('select key from kv order by key')
-        self.assertEqual([k for k, in curs], ['k1', 'k2', 'k3'])
+        stmt = self.db.execute('select key from kv order by key')
+        self.assertEqual([k for k, in stmt], ['k1', 'k2', 'k3'])
 
         self.assertEqual(accum, [
             (1, 'select key from kv order by key'),
@@ -428,10 +428,10 @@ class TestSmallCache(BaseTestCase):
         self.create_table()
         for i in range(10):
             self.create_rows(('k%s' % i, 'v%s' % i, i))
-            curs = self.db.execute('select * from kv where id > %s' % i)
-            self.assertEqual(len(list(curs)), 1)
+            stmt = self.db.execute('select * from kv where id > %s' % i)
+            self.assertEqual(len(list(stmt)), 1)
 
-        curs = self.db.execute('select * from kv order by key')
+        stmt = self.db.execute('select * from kv order by key')
         self.assertEqual(self.db.get_stmt_cache(), (3, 1))  # avail / in-use.
 
         self.assertTrue(self.db.close())
@@ -442,14 +442,14 @@ class TestSmallCache(BaseTestCase):
         self.create_table()
         self.create_rows(('k1', 'v1', 1))
 
-        curs = self.db.execute('select * from kv')
-        curs_id = id(curs)  # Which statement is this?
+        stmt = self.db.execute('select * from kv')
+        stmt_id = id(stmt)  # Which statement is this?
         self.assertEqual(self.db.get_stmt_cache(), (2, 1))
-        self.assertEqual(list(curs), [(1, 'k1', 'v1', 1)])
+        self.assertEqual(list(stmt), [(1, 'k1', 'v1', 1)])
         self.assertEqual(self.db.get_stmt_cache(), (3, 0))
 
-        curs = self.db.execute('select * from kv')
-        self.assertEqual(id(curs), curs_id)  # Same cursor as before.
+        stmt = self.db.execute('select * from kv')
+        self.assertEqual(id(stmt), stmt_id)  # Same stmt as before.
         self.assertEqual(self.db.get_stmt_cache(), (2, 1))
         self.db.close()
 
@@ -457,10 +457,60 @@ class TestSmallCache(BaseTestCase):
         self.create_table()
         self.assertEqual(self.db.get_stmt_cache(), (1, 0))
 
-        curs = self.db.execute('select count(*) from kv')
+        stmt = self.db.execute('select count(*) from kv')
         self.assertEqual(self.db.get_stmt_cache(), (1, 1))
-        self.assertEqual(curs.value(), 0)  # value() recycles stmt.
+        self.assertEqual(stmt.value(), 0)  # value() recycles stmt.
         self.assertEqual(self.db.get_stmt_cache(), (2, 0))
+
+    def test_statement_reuse(self):
+        self.create_table()
+        self.assertEqual(self.db.get_stmt_cache(), (1, 0))
+        self.create_rows(('k1', 'v1', 1))
+        self.create_rows(('k2', 'v2', 2))
+        self.assertEqual(self.db.get_stmt_cache(), (2, 0))
+
+        stmt = self.db.execute('select "key" from kv order by "key"')
+        self.assertEqual([row[0] for row in stmt], ['k1', 'k2'])
+        self.assertEqual(self.db.get_stmt_cache(), (3, 0))
+
+        # Iterating again does not work:
+        self.assertEqual([row[0] for row in stmt], [])
+
+        # The statement cache now has 3 available queries (create tbl, insert,
+        # and the select query, which was fully-consumed, reset and returned to
+        # the cache).
+        self.assertEqual(self.db.get_stmt_cache(), (3, 0))
+
+        # Re-executing the statement will pop it from the available list. It
+        # does not re-add it to "in use", though.
+        stmt.execute()
+        self.assertEqual(stmt.fetchone(), ('k1',))
+        self.assertEqual(self.db.get_stmt_cache(), (2, 0))
+
+        # Running the same query again is fine - it will create a new in_use
+        # cache entry.
+        stmt2 = self.db.execute('select "key" from kv order by "key"')
+        self.assertEqual(stmt2.fetchone(), ('k1',))
+        self.assertEqual(self.db.get_stmt_cache(), (2, 1))
+
+        # The next iteration is fine.
+        self.assertEqual(stmt2.fetchone(), ('k2',))
+        self.assertEqual(self.db.get_stmt_cache(), (2, 1))
+
+        # Our original statment is also fine.
+        row = stmt.fetchone()
+        self.assertEqual(row, ('k2',))
+        self.assertEqual(self.db.get_stmt_cache(), (2, 1))
+
+        # Now our original (orphaned) statement is consumed - it gets reset and
+        # put back in the available cache, but stmt2 is still "in use".
+        self.assertTrue(stmt.fetchone() is None)
+        self.assertEqual(self.db.get_stmt_cache(), (3, 1))
+
+        # Now stmt2 is consumed, it gets reset and put back in the cache,
+        # overwriting the cached stmt (since they use the same SQL).
+        self.assertTrue(stmt2.fetchone() is None)
+        self.assertEqual(self.db.get_stmt_cache(), (3, 0))
 
 
 class TestBlob(BaseTestCase):
@@ -591,9 +641,9 @@ class DataTypes(TableFunction):
 class TestDataTypesTableFunction(BaseTestCase):
     def test_data_types_table_function(self):
         DataTypes.register(self.db)
-        curs = self.db.execute('SELECT key, value FROM data_types() '
+        stmt = self.db.execute('SELECT key, value FROM data_types() '
                                'ORDER BY key')
-        self.assertEqual(list(curs), [
+        self.assertEqual(list(stmt ), [
             ('k0', None),
             ('k1', 1),
             ('k2', 2.),
@@ -664,9 +714,9 @@ class TestTableFunction(BaseTestCase):
 
     def test_split(self):
         Split.register(self.db)
-        curs = self.execute('select part from str_split(?) order by part '
+        stmt = self.execute('select part from str_split(?) order by part '
                             'limit 3', ('well hello huey and zaizee',))
-        self.assertEqual([row for row, in curs],
+        self.assertEqual([row for row, in stmt],
                          ['and', 'hello', 'huey'])
 
     def test_split_tbl(self):
@@ -676,8 +726,8 @@ class TestTableFunction(BaseTestCase):
                      ('huey secret post',
                       'mickey message',
                       'zaizee diary'))
-        curs = self.execute('SELECT * FROM post, str_split(post.content)')
-        self.assertEqual(list(curs), [
+        stmt = self.execute('SELECT * FROM post, str_split(post.content)')
+        self.assertEqual(list(stmt), [
             ('huey secret post', 'huey'),
             ('huey secret post', 'secret'),
             ('huey secret post', 'post'),
@@ -695,8 +745,8 @@ class TestTableFunction(BaseTestCase):
             sql = 'SELECT * FROM series(%s)' % param_sql
             if extra_sql:
                 sql = ' '.join((sql, extra_sql))
-            curs = self.execute(sql, params)
-            self.assertEqual([row for row, in curs], values)
+            stmt = self.execute(sql, params)
+            self.assertEqual([row for row, in stmt], values)
 
         assertSeries((0, 10, 2), [0, 2, 4, 6, 8, 10])
         assertSeries((5, None, 20), [5, 25, 45, 65, 85], 'LIMIT 5')
@@ -709,21 +759,21 @@ class TestTableFunction(BaseTestCase):
         self.execute('CREATE TABLE nums (id INTEGER PRIMARY KEY)')
         self.execute('INSERT INTO nums DEFAULT VALUES;')
         self.execute('INSERT INTO nums DEFAULT VALUES;')
-        curs = self.execute('SELECT * FROM nums, series(nums.id, nums.id + 2)')
-        self.assertEqual(list(curs), [
+        stmt = self.execute('SELECT * FROM nums, series(nums.id, nums.id + 2)')
+        self.assertEqual(list(stmt), [
             (1, 1), (1, 2), (1, 3),
             (2, 2), (2, 3), (2, 4)])
 
-        curs = self.execute('SELECT * FROM nums, series(nums.id) LIMIT 3')
-        self.assertEqual(list(curs), [(1, 1), (1, 2), (1, 3)])
+        stmt = self.execute('SELECT * FROM nums, series(nums.id) LIMIT 3')
+        self.assertEqual(list(stmt), [(1, 1), (1, 2), (1, 3)])
 
     def test_regex(self):
         RegexSearch.register(self.db)
 
         def assertResults(regex, search_string, values):
             sql = 'SELECT * FROM regex_search(?, ?)'
-            curs = self.execute(sql, (regex, search_string))
-            self.assertEqual([row for row, in curs], values)
+            stmt = self.execute(sql, (regex, search_string))
+            self.assertEqual([row for row, in stmt], values)
 
         assertResults(
             r'[0-9]+',
@@ -755,11 +805,11 @@ class TestTableFunction(BaseTestCase):
         self.execute('create table posts (id integer primary key, msg)')
         self.execute('insert into posts (msg) values (?), (?), (?), (?)',
                      messages)
-        curs = self.execute('select posts.id, regex_search.rowid, '
+        stmt = self.execute('select posts.id, regex_search.rowid, '
                             'regex_search.match '
                             'FROM posts, regex_search(?, posts.msg)',
                             (r'[\w]+@[\w]+\.\w{2,3}',))
-        self.assertEqual(list(curs), [
+        self.assertEqual(list(stmt), [
             (1, 1, 'foo@example.fap'),
             (1, 2, 'nuggie@example.fap'),
             (2, 3, 'baz@example.com'),
@@ -822,15 +872,15 @@ class TestTableFunction(BaseTestCase):
                     return ret
 
         SomewhatBroken.register(self.db)
-        curs = self.execute('SELECT * FROM somewhat_broken(0, 3)')
-        self.assertEqual(list(curs), [(0,), (1,), (2,), (3,)])
+        stmt = self.execute('SELECT * FROM somewhat_broken(0, 3)')
+        self.assertEqual(list(stmt), [(0,), (1,), (2,), (3,)])
 
-        curs = self.execute('SELECT * FROM somewhat_broken(5, 8)')
-        self.assertEqual(curs.fetchone(), (5,))
-        self.assertRaises(OperationalError, lambda: list(curs))
+        stmt = self.execute('SELECT * FROM somewhat_broken(5, 8)')
+        self.assertEqual(stmt.fetchone(), (5,))
+        self.assertRaises(OperationalError, lambda: list(stmt))
 
-        curs = self.execute('SELECT * FROM somewhat_broken(0, 2)')
-        self.assertEqual(list(curs), [(0,), (1,), (2,)])
+        stmt = self.execute('SELECT * FROM somewhat_broken(0, 2)')
+        self.assertEqual(list(stmt), [(0,), (1,), (2,)])
 
 
 class TestRankUDFs(BaseTestCase):
@@ -859,11 +909,11 @@ class TestRankUDFs(BaseTestCase):
         self.db.create_function(rank_lucene, 'rank_lucene')
 
     def assertSearch(self, q, expected, fn='rank_bm25'):
-        curs = self.db.execute('select docid, '
+        stmt = self.db.execute('select docid, '
                                '%s(matchinfo(search, ?), 1) AS r '
                                'from search where search match ? '
                                'order by r' % fn, ('pcnalx', q))
-        results = [(docid, round(score, 3)) for docid, score in curs]
+        results = [(docid, round(score, 3)) for docid, score in stmt]
         self.assertEqual(results, expected)
 
     def test_scoring(self):
@@ -890,8 +940,8 @@ class TestStringDistanceUDFs(BaseTestCase):
         self.db.create_function(damerau_levenshtein_dist, 'dlevdist')
 
     def _assertLev(self, f, s1, s2, n):
-        curs = self.db.execute('select %s(?, ?)' % f, (s1, s2))
-        score, = next(curs)
+        stmt = self.db.execute('select %s(?, ?)' % f, (s1, s2))
+        score, = next(stmt)
         self.assertEqual(score, n, '(%s, %s) %s != %s' % (s1, s2, n, score))
 
     def assertLev(self, s1, s2, n):
@@ -980,9 +1030,9 @@ class TestMedianUDF(BaseTestCase):
                         values)
 
     def assertMedianW(self, expected):
-        curs = self.db.execute('select k, x, median(x) over (partition by k) '
+        stmt = self.db.execute('select k, x, median(x) over (partition by k) '
                                'from g order by k, id')
-        self.assertEqual(list(curs), expected)
+        self.assertEqual(list(stmt), expected)
 
     def test_median_window(self):
         self.assertMedianW([])
