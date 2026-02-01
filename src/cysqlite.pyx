@@ -948,6 +948,7 @@ cdef class Statement(object):
 
     def close(self):
         self.reset()
+        self.finalize()
 
     def finalize(self):
         if self.st != NULL:
