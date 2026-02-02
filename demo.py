@@ -225,6 +225,7 @@ conn.execute('create table "data" ('
 print(conn.execute_one('pragma journal_mode'))
 conn.close()
 
-threads = [threading.Thread(target=work_thread, args=(filename,)) for i in range(8)]
+threads = [threading.Thread(target=work_thread, args=(filename,)) for i in range(4)]
 for t in threads: t.start()
 for t in threads: t.join()
+print('')

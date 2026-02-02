@@ -131,32 +131,34 @@ cdef class Connection(_callable_context_manager):
         sqlite3 *db
         public bint extensions
         public bint uri
+        public int cached_statements
         public int flags
         public float timeout
         public str database
         public str vfs
-        readonly bint closed
         # List of statements, transactions, savepoints, blob handles?
         bint in_sqlite
         dict functions
+        dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
         int _transaction_depth
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
         _Callback _trace_hook, _progress_hook
 
     def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
-                 extensions=True, autoconnect=False):
+                 cached_statements=100, extensions=True, autoconnect=False):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
         self.vfs = vfs
         self.uri = uri
+        self.cached_statements = cached_statements
         self.extensions = extensions
-        self.closed = True
         self.in_sqlite = False
 
         self.db = NULL
         self.functions = {}
+        self.stmt_available = {}
         self.stmt_in_use = weakref.WeakValueDictionary()
         self._transaction_depth = 0
 
@@ -168,7 +170,7 @@ cdef class Connection(_callable_context_manager):
             sqlite3_close_v2(self.db)
 
     cdef inline int enter_sqlite(self) except -1:
-        if self.closed:
+        if self.db == NULL:
             raise OperationalError('Cannot operate on a closed database.')
         if self.in_sqlite:
             raise RuntimeError('SQLite reentrancy detected')
@@ -179,13 +181,17 @@ cdef class Connection(_callable_context_manager):
         self.in_sqlite = False
 
     def finalize_statements(self, finalize=True):
+        cdef Statement stmt
         for stmt in self.stmt_in_use.values():
+            stmt.finalize()
+        for stmt in self.stmt_available.values():
             stmt.finalize()
 
         self.stmt_in_use.clear()
+        self.stmt_available.clear()
 
     def close(self):
-        if self.closed:
+        if self.db == NULL:
             return False
         if self.in_sqlite:
             raise OperationalError('Cannot close while SQLite active.')
@@ -230,7 +236,6 @@ cdef class Connection(_callable_context_manager):
             raise SqliteError('error closing database: %s' % rc)
 
         self.db = NULL
-        self.closed = True
         return True
 
     def connect(self):
@@ -273,14 +278,13 @@ cdef class Connection(_callable_context_manager):
             self.db = NULL
             raise_sqlite_error(self.db, 'error setting busy timeout: ')
 
-        self.closed = False
         return True
 
     cpdef is_closed(self):
         return self.db == NULL
 
     def get_stmt_usage(self):
-        return len(self.stmt_in_use)
+        return len(self.stmt_available), len(self.stmt_in_use)
 
     def __enter__(self):
         if not self.db:
@@ -302,9 +306,27 @@ cdef class Connection(_callable_context_manager):
         cdef:
             bytes bsql = encode(sql)
             Statement st
-        st = Statement(self, bsql)
+        if bsql in self.stmt_available:
+            st = self.stmt_available.pop(bsql)
+        else:
+            st = Statement(self, bsql)
         self.stmt_in_use[id(st)] = st
         return st
+
+    cdef stmt_release(self, Statement st):
+        if st.active:
+            raise RuntimeError('Cannot release active statement.')
+        if st.st == NULL:
+            raise Exception('Cannot release finalized statement.')
+        self.stmt_in_use.pop(id(st), None)
+        self.stmt_available[st.sql] = st
+
+        # Remove oldest statement from the cache - relies on Python 3.6
+        # dictionary retaining insertion order. For older python, will simply
+        # remove a random key, which is also fine.
+        while len(self.stmt_available) > self.cached_statements:
+            first_key = next(iter(self.stmt_available))
+            st = self.stmt_available.pop(first_key)
 
     def execute(self, sql, params=None):
         check_connection(self)
@@ -492,18 +514,28 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         return Atomic(self, lock)
 
-    def begin(self, lock=None):
+    cdef _execute_simple(self, sql):
         check_connection(self)
-        lock = encode(lock or b'DEFERRED')
-        self.execute(b'BEGIN %s' % lock)
+        cdef:
+            int rc
+            Statement stmt
+        stmt = self.stmt_get(sql)
+        rc = stmt.step()
+        if rc == SQLITE_DONE:
+            stmt.reset()
+            self.stmt_release(stmt)
+        else:
+            stmt.finalize()
+            raise_sqlite_error(self.db, 'error executing query: ')
+
+    def begin(self, lock=None):
+        self._execute_simple('BEGIN %s' % (lock or 'DEFERRED'))
 
     def commit(self):
-        check_connection(self)
-        self.execute(b'COMMIT')
+        self._execute_simple('COMMIT')
 
     def rollback(self):
-        check_connection(self)
-        self.execute(b'ROLLBACK')
+        self._execute_simple('ROLLBACK')
 
     def backup(self, Connection dest, pages=None, name=None, progress=None,
                src_name=None):
@@ -1031,7 +1063,7 @@ cdef class Cursor(object):
         if self.executing:
             # TODO: reset?
             raise OperationalError('Cursor already executing.')
-        self.stmt = Statement(self.conn, sql)
+        self.stmt = self.conn.stmt_get(sql)
         if params:
             if not isinstance(params, tuple):
                 params = tuple(params)
@@ -1058,6 +1090,8 @@ cdef class Cursor(object):
     def __next__(self):
         if not self.executing:
             raise StopIteration
+        elif self.stmt.st == NULL:
+            raise OperationalError('Database was closed.')
 
         row = None
 
@@ -1075,6 +1109,7 @@ cdef class Cursor(object):
     cdef finish(self):
         if self.stmt is not None:
             self.stmt.reset()
+            self.conn.stmt_release(self.stmt)
             self.stmt = None
 
         self.executing = False
@@ -2051,13 +2086,14 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
 
 
 def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
-            extensions=True, autoconnect=True):
+            cached_statements=100, extensions=True, autoconnect=True):
     """Open a connection to an SQLite database."""
     conn = Connection(database,
                       flags=flags,
                       timeout=timeout,
                       vfs=vfs,
                       uri=uri,
+                      cached_statements=cached_statements,
                       extensions=extensions,
                       autoconnect=autoconnect)
     return conn

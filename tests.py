@@ -425,53 +425,51 @@ class TestStatementUsage(BaseTestCase):
         return Connection(self.filename, **kwargs)
 
     def test_reuse(self):
-        self.create_table()
+        self.create_table()  # 1 statement.
         for i in range(10):
-            self.create_rows(('k%s' % i, 'v%s' % i, i))
-            stmt = self.db.execute('select * from kv where id > %s' % i)
+            self.create_rows(('k%s' % i, 'v%s' % i, i))  # 2nd stmt.
+            stmt = self.db.execute('select * from kv where id > ?', (i,))  # 3.
             self.assertEqual(len(list(stmt)), 1)
 
         stmt = self.db.execute('select * from kv order by key')
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (3, 1))
 
         self.assertTrue(self.db.close())
         self.assertTrue(self.db.connect())
-        self.assertEqual(self.db.get_stmt_usage(), 0)
+        self.assertEqual(self.db.get_stmt_usage(), (0, 0))
 
     def test_cached_statement(self):
         self.create_table()
         self.create_rows(('k1', 'v1', 1))
 
         stmt = self.db.execute('select * from kv')
-        stmt_id = id(stmt)  # Which statement is this?
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 1))
         self.assertEqual(list(stmt), [(1, 'k1', 'v1', 1)])
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (3, 0))
 
         stmt = self.db.execute('select * from kv')
-        self.assertNotEqual(id(stmt), stmt_id)  # Same stmt as before.
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 1))
         self.db.close()
 
     def test_cache_release(self):
         self.create_table()
-        self.assertEqual(self.db.get_stmt_usage(), 0)
+        self.assertEqual(self.db.get_stmt_usage(), (1, 0))
 
         stmt = self.db.execute('select count(*) from kv')
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (1, 1))
         self.assertEqual(stmt.value(), 0)  # value() recycles stmt.
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 0))
 
     def test_statement_reuse(self):
         self.create_table()
-        self.assertEqual(self.db.get_stmt_usage(), 0)
+        self.assertEqual(self.db.get_stmt_usage(), (1, 0))
         self.create_rows(('k1', 'v1', 1))
         self.create_rows(('k2', 'v2', 2))
-        self.assertEqual(self.db.get_stmt_usage(), 0)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 0))
 
         stmt = self.db.execute('select "key" from kv order by "key"')
         self.assertEqual([row[0] for row in stmt], ['k1', 'k2'])
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (3, 0))
 
         # Iterating again does not work:
         self.assertEqual([row[0] for row in stmt], [])
@@ -479,71 +477,66 @@ class TestStatementUsage(BaseTestCase):
         # The statement cache now has 3 available queries (create tbl, insert,
         # and the select query, which was fully-consumed, reset and returned to
         # the cache).
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (3, 0))
 
         # Re-executing the statement will pop it from the available list. It
         # does not re-add it to "in use", though.
-        stmt.execute()
+        stmt = self.db.execute('select "key" from kv order by "key"')
         self.assertEqual(stmt.fetchone(), ('k1',))
-        self.assertEqual(self.db.get_stmt_usage(), 1)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 1))
 
         # Running the same query again is fine - it will create a new in_use
         # cache entry.
         stmt2 = self.db.execute('select "key" from kv order by "key"')
         self.assertEqual(stmt2.fetchone(), ('k1',))
-        self.assertEqual(self.db.get_stmt_usage(), 2)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 2))
 
         # The next iteration is fine.
         self.assertEqual(stmt2.fetchone(), ('k2',))
-        self.assertEqual(self.db.get_stmt_usage(), 2)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 2))
 
         # Our original statment is also fine.
         row = stmt.fetchone()
         self.assertEqual(row, ('k2',))
-        self.assertEqual(self.db.get_stmt_usage(), 2)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 2))
 
         # Now our original (orphaned) statement is consumed - it gets reset and
         # put back in the available cache, but stmt2 is still "in use".
         self.assertTrue(stmt.fetchone() is None)
-        self.assertEqual(self.db.get_stmt_usage(), 2)
+        self.assertEqual(self.db.get_stmt_usage(), (3, 1))
 
         # Now stmt2 is consumed, it gets reset and put back in the cache,
         # overwriting the cached stmt (since they use the same SQL).
         self.assertTrue(stmt2.fetchone() is None)
-        self.assertEqual(self.db.get_stmt_usage(), 2)
+        self.assertEqual(self.db.get_stmt_usage(), (3, 0))
 
     def test_statement_reuse2(self):
         self.create_table()
-        self.assertEqual(self.db.get_stmt_usage(), 0)
+        self.assertEqual(self.db.get_stmt_usage(), (1, 0))
         self.create_rows(('k1', 'v1', 1))
         self.create_rows(('k2', 'v2', 2))
-        self.assertEqual(self.db.get_stmt_usage(), 0)
+        self.assertEqual(self.db.get_stmt_usage(), (2, 0))
 
-        stmt = self.db.execute('select "key" from kv order by "key"')
-        # Consume stmt, it is returned to available statements.
-        self.assertEqual([row[0] for row in stmt], ['k1', 'k2'])
+        curs = self.db.execute('select "key" from kv order by "key"')
+        # Consume cursor, stmt is returned to available statements.
+        self.assertEqual([row[0] for row in curs], ['k1', 'k2'])
 
         # This pulls from available - need to figure out better way of managing
         # the lifetime.
-        stmt2 = self.db.execute('select "key" from kv order by "key"')
-        self.assertFalse(id(stmt) == id(stmt2))
+        curs2 = self.db.execute('select "key" from kv order by "key"')
+        self.assertEqual(self.db.get_stmt_usage(), (2, 1))
 
-        self.assertEqual(self.db.get_stmt_usage(), 2)
-
-        stmt = self.db.execute('select "key" from kv where "key" != ? '
+        curs = self.db.execute('select "key" from kv where "key" != ? '
                                'order by "key"', ('kx',))
-        self.assertEqual(next(stmt), ('k1',))
-        self.assertEqual(next(stmt), ('k2',))
-        self.assertRaises(StopIteration, lambda: next(stmt))
-
-        self.assertEqual(next(stmt.execute()), ('k1',))
-        self.assertEqual(next(stmt), ('k2',))
+        self.assertEqual(next(curs), ('k1',))
+        self.assertEqual(next(curs), ('k2',))
 
     def test_statement_after_close(self):
-        stmt = self.db.execute('select 1')
+        curs = self.db.execute('select 1')
         self.db.close()
         self.db.connect()
-        self.assertRaises(OperationalError, stmt.execute)
+        self.assertRaises(OperationalError, lambda: next(curs))
+        self.assertRaises(OperationalError, lambda: curs.execute('select 1'))
 
     def test_statement_too_much(self):
         with self.assertRaises(ProgrammingError):
