@@ -71,6 +71,7 @@ class NotSupportedError(DatabaseError): pass
 # Forward references.
 cdef class _Callback(object)
 cdef class Statement(object)
+cdef class Cursor(object)
 cdef class Transaction(object)
 cdef class Savepoint(object)
 cdef class Blob(object)
@@ -104,10 +105,9 @@ cdef class _callable_context_manager(object):
                 return fn(*args, **kwargs)
         return inner
 
-
 cdef inline check_connection(Connection conn):
-    if not conn.db:
-        raise OperationalError('Cannot operate on a closed database!')
+    if conn.db == NULL:
+        raise OperationalError('Cannot operate on closed database.')
 
 cdef inline check_statement(Statement stmt):
     if stmt.st == NULL:
@@ -135,7 +135,9 @@ cdef class Connection(_callable_context_manager):
         public float timeout
         public str database
         public str vfs
+        readonly bint closed
         # List of statements, transactions, savepoints, blob handles?
+        bint in_sqlite
         dict functions
         object stmt_in_use  # id(stmt) -> Statement.
         int _transaction_depth
@@ -150,6 +152,8 @@ cdef class Connection(_callable_context_manager):
         self.vfs = vfs
         self.uri = uri
         self.extensions = extensions
+        self.closed = True
+        self.in_sqlite = False
 
         self.db = NULL
         self.functions = {}
@@ -163,6 +167,16 @@ cdef class Connection(_callable_context_manager):
         if self.db and sqlite3_close_v2(self.db) == SQLITE_OK:
             self.db = NULL
 
+    cdef inline void enter_sqlite(self) except *:
+        if self.closed:
+            raise OperationalError('Cannot operate on a closed database.')
+        if self.in_sqlite:
+            raise RuntimeError('SQLite reentrancy detected')
+        self.in_sqlite = True
+
+    cdef inline void leave_sqlite(self) noexcept:
+        self.in_sqlite = False
+
     def finalize_statements(self, finalize=True):
         for stmt in self.stmt_in_use.values():
             stmt.finalize()
@@ -170,8 +184,10 @@ cdef class Connection(_callable_context_manager):
         self.stmt_in_use.clear()
 
     def close(self):
-        if not self.db:
+        if self.closed:
             return False
+        if self.in_sqlite:
+            raise OperationalError('Cannot close while SQLite active.')
 
         if self._transaction_depth > 0:
             raise SqliteError('cannot close database while a transaction is '
@@ -213,6 +229,7 @@ cdef class Connection(_callable_context_manager):
             raise SqliteError('error closing database: %s' % rc)
 
         self.db = NULL
+        self.closed = True
         return True
 
     def connect(self):
@@ -244,13 +261,18 @@ cdef class Connection(_callable_context_manager):
         if self.extensions:
             rc = sqlite3_enable_load_extension(self.db, 1)
             if rc != SQLITE_OK:
+                sqlite3_close_v2(self.db)
+                self.db = NULL
                 raise_sqlite_error(self.db, 'error enabling extensions: ')
 
         cdef int timeout = int(self.timeout * 1000)
         rc = sqlite3_busy_timeout(self.db, timeout)
         if rc != SQLITE_OK:
+            sqlite3_close_v2(self.db)
+            self.db = NULL
             raise_sqlite_error(self.db, 'error setting busy timeout: ')
 
+        self.closed = False
         return True
 
     cpdef is_closed(self):
@@ -285,17 +307,18 @@ cdef class Connection(_callable_context_manager):
 
     def execute(self, sql, params=None):
         check_connection(self)
-        st = self.prepare(sql, params or ())
-        return st.execute()
+        #st = self.prepare(sql, params or ())
+        #return st.execute()
+        cursor = Cursor(self)
+        cursor.execute(sql, params)
+        return cursor
 
     def execute_one(self, sql, params=None):
-        cdef Statement st = self.execute(sql, params)
+        cdef Cursor c = self.execute(sql, params)
         try:
-            return next(st)
+            return next(c)
         except StopIteration:
             return
-        finally:
-            st.reset()
 
     def execute_simple(self, sql, callback=None):
         check_connection(self)
@@ -808,29 +831,27 @@ cdef class Connection(_callable_context_manager):
         return (pnLog, pnCkpt)
 
 
-
 cdef class Statement(object):
     cdef:
         readonly Connection conn
         sqlite3_stmt *st
+        bint active
         bytes sql
-        int step_status
-        object row_data
-        tuple _description
         object __weakref__
 
-    def __init__(self, Connection conn, sql):
+    def __cinit__(self, Connection conn, sql):
         self.conn = conn
         self.sql = encode(sql)
         self.st = NULL
-        self.prepare_statement()
 
-        self.step_status = -1
-        self.row_data = None
-        self._description = None
+        self.conn.enter_sqlite()
+        try:
+            self.prepare_statement()
+        finally:
+            self.conn.leave_sqlite()
 
     def __dealloc__(self):
-        if self.st:
+        if self.st != NULL:
             sqlite3_finalize(self.st)
 
     cdef prepare_statement(self):
@@ -865,9 +886,6 @@ cdef class Statement(object):
             pos += 1
 
     cdef bind(self, tuple params):
-        check_connection(self.conn)
-        check_statement(self)
-
         cdef:
             bytes tmp
             char *buf
@@ -922,91 +940,26 @@ cdef class Statement(object):
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.conn.db, 'error binding parameter: ')
 
-    cdef reset(self):
-        check_connection(self.conn)
-        if self.st == NULL:
-            return 0
+    cdef int step(self) except *:
+        cdef int rc
+        self.conn.enter_sqlite()
+        try:
+            with nogil:
+                rc = sqlite3_step(self.st)
+        finally:
+            self.conn.leave_sqlite()
+        return rc
 
-        self.step_status = -1
-        cdef int rc = sqlite3_reset(self.st)
+    cdef void reset(self) noexcept:
+        if self.st != NULL:
+            sqlite3_reset(self.st)
+            sqlite3_clear_bindings(self.st)
+        self.active = False
 
-        if rc != SQLITE_OK:
-            raise_sqlite_error(self.conn.db, 'error resetting statement: ')
-
-    def close(self):
-        self.reset()
-        self.finalize()
-
-    def finalize(self):
+    cdef void finalize(self) noexcept:
         if self.st != NULL:
             sqlite3_finalize(self.st)
-        self.st = NULL
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        check_connection(self.conn)
-        check_statement(self)
-
-        row = None
-
-        # Statement has already been consumed and cannot be re-run without
-        # calling .execute() again.
-        if self.step_status == -1:
-            raise StopIteration
-
-        if self.step_status == SQLITE_ROW:
-            row = self.get_row_data()
-            self.step_status = sqlite3_step(self.st)
-        elif self.step_status == SQLITE_DONE:
-            self.reset()
-            raise StopIteration
-        else:
-            try:
-                self.reset()
-            except Exception:
-                pass  # Ignore errors resetting.
-            raise_sqlite_error(self.conn.db, 'error executing query: ')
-        return row
-
-    def fetchone(self):
-        try:
-            return next(self)
-        except StopIteration:
-            return
-
-    def fetchall(self):
-        return list(self)
-
-    def value(self):
-        try:
-            return next(self)[0]
-        except StopIteration:
-            pass
-        finally:
-            self.reset()
-
-    def execute(self):
-        check_connection(self.conn)
-        check_statement(self)
-
-        if self.step_status != -1:
-            self.reset()
-
-        self._description = None
-        self.step_status = sqlite3_step(self.st)
-        if self.step_status == SQLITE_DONE:
-            self.reset()
-            return self
-        elif self.step_status == SQLITE_ROW:
-            return self
-        else:
-            try:
-                self.reset()
-            except Exception:
-                pass  # Ignore errors resetting.
-            raise_sqlite_error(self.conn.db, 'error executing query: ')
+            self.st = NULL
 
     cdef get_row_data(self):
         cdef:
@@ -1041,13 +994,10 @@ cdef class Statement(object):
 
         return result
 
-    def column_count(self):
-        check_statement(self)
+    cdef column_count(self):
         return sqlite3_column_count(self.st)
 
-    def columns(self):
-        check_statement(self)
-
+    cdef columns(self):
         cdef:
             bytes col_name
             int col_count, i
@@ -1059,21 +1009,123 @@ cdef class Statement(object):
             accum.append(decode(col_name))
         return accum
 
+
+cdef class Cursor(object):
+    cdef:
+        readonly Connection conn
+        Statement stmt
+        bint executing
+        bint done
+        int step_status
+        tuple _description
+
+    def __cinit__(self, Connection conn):
+        self.conn = conn
+        self.stmt = None
+        self.executing = False
+        self.done = False
+        self._description = None
+
+    def execute(self, sql, params=None):
+        if self.executing:
+            # TODO: reset?
+            raise OperationalError('Cursor already executing.')
+        self.stmt = Statement(self.conn, sql)
+        if params:
+            if not isinstance(params, tuple):
+                params = tuple(params)
+            self.stmt.bind(params)
+
+        self.step_status = self.stmt.step()
+        if self.step_status == SQLITE_ROW:
+            self.executing = True
+            self.done = False
+            self.stmt.active = True
+            self.description
+        elif self.step_status == SQLITE_DONE:
+            self.description
+            self.finish()
+        else:
+            self.abort()
+            raise_sqlite_error(self.conn.db, 'error executing query: ')
+
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self.executing:
+            raise StopIteration
+
+        row = None
+
+        if self.step_status == SQLITE_ROW:
+            row = self.stmt.get_row_data()
+            self.step_status = self.stmt.step()
+        elif self.step_status == SQLITE_DONE:
+            self.finish()
+            raise StopIteration
+        else:
+            self.abort()
+            raise_sqlite_error(self.conn.db, 'error executing query: ')
+        return row
+
+    cdef finish(self):
+        if self.stmt is not None:
+            self.stmt.reset()
+            self.stmt = None
+
+        self.executing = False
+        self.done = True
+
+    cdef abort(self):
+        if self.stmt is not None:
+            self.stmt.reset()
+            self.stmt = None
+
+        self.executing = False
+
+    def close(self):
+        self.finish()
+
+    def fetchone(self):
+        try:
+            return next(self)
+        except StopIteration:
+            return
+
+    def fetchall(self):
+        return list(self)
+
+    def value(self):
+        try:
+            return next(self)[0]
+        except StopIteration:
+            pass
+        finally:
+            self.finish()
+
+    def column_count(self):
+        return sqlite3_column_count(self.stmt.st)
+
+    def columns(self):
+        cdef:
+            bytes col_name
+            int col_count, i
+            list accum = []
+
+        col_count = sqlite3_column_count(self.stmt.st)
+        for i in range(col_count):
+            col_name = sqlite3_column_name(self.stmt.st, i)
+            accum.append(decode(col_name))
+        return accum
+
     @property
     def description(self):
         if self._description is None:
             self._description = tuple([(name,) for name in self.columns()])
         return self._description
-
-    def is_readonly(self):
-        if not self.st: raise SqliteError('statement is not available')
-        return sqlite3_stmt_readonly(self.st)
-    def is_explain(self):
-        if not self.st: raise SqliteError('statement is not available')
-        return sqlite3_stmt_isexplain(self.st)
-    def is_busy(self):
-        if not self.st: raise SqliteError('statement is not available')
-        return sqlite3_stmt_busy(self.st)
 
 
 cdef class _Callback(object):
