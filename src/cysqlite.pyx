@@ -4,7 +4,6 @@ from cpython.bytes cimport PyBytes_AsString
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.object cimport PyObject
-from cpython.pythread cimport PyThread_get_thread_ident
 from cpython.ref cimport Py_DECREF
 from cpython.ref cimport Py_INCREF
 from cpython.tuple cimport PyTuple_New
@@ -109,14 +108,6 @@ cdef class _callable_context_manager(object):
 cdef inline check_connection(Connection conn):
     if not conn.db:
         raise OperationalError('Cannot operate on a closed database!')
-    if conn.check_same_thread:
-        check_thread(conn)
-
-cdef inline int check_thread(Connection conn) except -1:
-    if PyThread_get_thread_ident() != conn.thread_ident:
-        raise ProgrammingError(
-            'SQLite objects created in a thread can only be used in that '
-            'same thread')
 
 cdef inline check_statement(Statement stmt):
     if stmt.st == NULL:
@@ -138,14 +129,12 @@ SENTINEL = object()
 cdef class Connection(_callable_context_manager):
     cdef:
         sqlite3 *db
-        uintptr_t thread_ident
         public bint extensions
         public bint uri
         public int flags
         public float timeout
         public str database
         public str vfs
-        bint check_same_thread
         # List of statements, transactions, savepoints, blob handles?
         dict functions
         object stmt_in_use  # id(stmt) -> Statement.
@@ -154,15 +143,13 @@ cdef class Connection(_callable_context_manager):
         _Callback _trace_hook, _progress_hook
 
     def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
-                 extensions=True, check_same_thread=True, autoconnect=False):
+                 extensions=True, autoconnect=False):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
         self.vfs = vfs
         self.uri = uri
         self.extensions = extensions
-        self.check_same_thread = check_same_thread
-        self.thread_ident = PyThread_get_thread_ident()
 
         self.db = NULL
         self.functions = {}
@@ -1099,9 +1086,8 @@ cdef class _Callback(object):
         self.fn = fn
 
 cdef inline bint callback_allowed(Connection conn):
-    if not conn.check_same_thread:
-        return True
-    return PyThread_get_thread_ident() == conn.thread_ident
+    # TODO: re-entrancy check.
+    return True
 
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
@@ -2012,7 +1998,7 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
 
 
 def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
-            extensions=True, check_same_thread=True, autoconnect=True):
+            extensions=True, autoconnect=True):
     """Open a connection to an SQLite database."""
     conn = Connection(database,
                       flags=flags,
@@ -2020,7 +2006,6 @@ def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
                       vfs=vfs,
                       uri=uri,
                       extensions=extensions,
-                      check_same_thread=check_same_thread,
                       autoconnect=autoconnect)
     return conn
 
