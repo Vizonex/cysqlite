@@ -136,6 +136,7 @@ cdef class Statement(object):
     cdef:
         readonly Connection conn
         sqlite3_stmt *st
+        bint is_dml
         bytes sql
         object __weakref__  # Allow weak-references to be made.
 
@@ -143,6 +144,7 @@ cdef class Statement(object):
         self.conn = conn
         self.sql = sql
         self.st = NULL
+        self.is_dml = False
         self.prepare_statement()
 
     def __dealloc__(self):
@@ -169,6 +171,8 @@ cdef class Statement(object):
         if self._check_tail(tail):
             raise ProgrammingError('Can only execute one query at a time.')
 
+        self.is_dml = not sqlite3_stmt_readonly(self.st)
+
     cdef _check_tail(self, const char *tail):
         cdef const char* pos = tail
         while pos[0] != 0:
@@ -189,7 +193,7 @@ cdef class Statement(object):
 
         pc = sqlite3_bind_parameter_count(self.st)
         if pc != len(params):
-            raise SqliteError('error: %s parameters required' % pc)
+            raise OperationalError('error: %s parameters required' % pc)
 
         # Note: sqlite3_bind_XXX uses 1-based indexes.
         for i in range(pc):
@@ -210,6 +214,7 @@ cdef class Statement(object):
                                          SQLITE_TRANSIENT,
                                          SQLITE_UTF8)
             elif PyObject_CheckBuffer(param):
+                # bytes, bytearray, memoryview.
                 if PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO):
                     raise TypeError('Object does not support readable buffer.')
                 rc = sqlite3_bind_blob64(self.st, i + 1, view.buf,
@@ -233,25 +238,21 @@ cdef class Statement(object):
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.conn.db, 'error binding parameter: ')
 
-    cdef int step(self) except *:
+    cdef int step(self):
         cdef int rc
-        self.conn.enter_sqlite()
-        try:
-            with nogil:
-                rc = sqlite3_step(self.st)
-        finally:
-            self.conn.leave_sqlite()
+        with nogil:
+            rc = sqlite3_step(self.st)
         return rc
 
-    cdef void reset(self) noexcept:
-        if self.st != NULL:
-            sqlite3_reset(self.st)
-            sqlite3_clear_bindings(self.st)
+    cdef int reset(self):
+        cdef int rc = sqlite3_reset(self.st)
+        sqlite3_clear_bindings(self.st)
+        return rc
 
-    cdef void finalize(self) noexcept:
-        if self.st != NULL:
-            sqlite3_finalize(self.st)
-            self.st = NULL
+    cdef int finalize(self):
+        sqlite3_finalize(self.st)
+        self.st = NULL
+        return 0
 
     cdef get_row_data(self):
         cdef:
@@ -313,23 +314,34 @@ cdef class Statement(object):
 cdef class Cursor(object):
     cdef:
         readonly Connection conn
+        readonly tuple description
+        readonly object lastrowid
+        readonly int rowcount
         Statement stmt
         bint executing
-        bint done
         int step_status
-        tuple _description
 
     def __cinit__(self, Connection conn):
         self.conn = conn
         self.stmt = None
         self.executing = False
-        self.done = False
-        self._description = None
+        self.description = None
+
+    cdef set_description(self):
+        self.description = tuple([(name,) for name in self.stmt.columns()])
 
     def execute(self, sql, params=None):
-        if self.executing:
-            # TODO: reset?
-            raise OperationalError('Cursor already executing.')
+        if self.conn.db == NULL:
+            self.stmt = None
+            self.executing = False
+            raise OperationalError('Database is closed.')
+        elif self.executing:
+            raise OperationalError('Cursor is already in use.')
+
+        self.description = None
+        self.rowcount = -1
+        self.lastrowid = None
+
         self.stmt = self.conn.stmt_get(sql)
         if params:
             if not isinstance(params, tuple):
@@ -339,14 +351,17 @@ cdef class Cursor(object):
         self.step_status = self.stmt.step()
         if self.step_status == SQLITE_ROW:
             self.executing = True
-            self.done = False
-            self.description
+            self.set_description()
         elif self.step_status == SQLITE_DONE:
-            self.description
+            self.set_description()
             self.finish()
         else:
             self.abort()
             raise_sqlite_error(self.conn.db, 'error executing query: ')
+
+        if self.stmt.is_dml:
+            self.rowcount = self.conn.changes()
+            self.lastrowid = self.conn.last_insert_rowid()
 
         return self
 
@@ -354,10 +369,11 @@ cdef class Cursor(object):
         return self
 
     def __next__(self):
-        if not self.executing:
-            raise StopIteration
-        elif self.stmt.st == NULL:
+        if self.stmt.st == NULL or self.conn.db == NULL:
+            self.stmt = None
             raise OperationalError('Database was closed.')
+        elif not self.executing:
+            raise StopIteration
 
         row = None
 
@@ -379,11 +395,10 @@ cdef class Cursor(object):
             self.stmt = None
 
         self.executing = False
-        self.done = True
 
     cdef abort(self):
         if self.stmt is not None:
-            self.stmt.reset()
+            self.stmt.finalize()
             self.stmt = None
 
         self.executing = False
@@ -408,27 +423,6 @@ cdef class Cursor(object):
         finally:
             self.finish()
 
-    def column_count(self):
-        return sqlite3_column_count(self.stmt.st)
-
-    def columns(self):
-        cdef:
-            bytes col_name
-            int col_count, i
-            list accum = []
-
-        col_count = sqlite3_column_count(self.stmt.st)
-        for i in range(col_count):
-            col_name = sqlite3_column_name(self.stmt.st, i)
-            accum.append(decode(col_name))
-        return accum
-
-    @property
-    def description(self):
-        if self._description is None:
-            self._description = tuple([(name,) for name in self.columns()])
-        return self._description
-
 
 cdef class Connection(_callable_context_manager):
     cdef:
@@ -441,7 +435,6 @@ cdef class Connection(_callable_context_manager):
         public str database
         public str vfs
         # List of statements, transactions, savepoints, blob handles?
-        bint in_sqlite
         dict functions
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
@@ -458,7 +451,6 @@ cdef class Connection(_callable_context_manager):
         self.uri = uri
         self.cached_statements = cached_statements
         self.extensions = extensions
-        self.in_sqlite = False
 
         self.db = NULL
         self.functions = {}
@@ -473,17 +465,6 @@ cdef class Connection(_callable_context_manager):
         if self.db:
             sqlite3_close_v2(self.db)
 
-    cdef inline int enter_sqlite(self) except -1:
-        if self.db == NULL:
-            raise OperationalError('Cannot operate on a closed database.')
-        if self.in_sqlite:
-            raise RuntimeError('SQLite reentrancy detected')
-        self.in_sqlite = True
-        return 0
-
-    cdef inline void leave_sqlite(self) noexcept:
-        self.in_sqlite = False
-
     def finalize_statements(self, finalize=True):
         cdef Statement stmt
         for stmt in self.stmt_in_use.values():
@@ -497,8 +478,6 @@ cdef class Connection(_callable_context_manager):
     def close(self):
         if self.db == NULL:
             return False
-        if self.in_sqlite:
-            raise OperationalError('Cannot close while SQLite active.')
 
         if self._transaction_depth > 0:
             raise SqliteError('cannot close database while a transaction is '
@@ -632,8 +611,6 @@ cdef class Connection(_callable_context_manager):
 
     def execute(self, sql, params=None):
         check_connection(self)
-        #st = self.prepare(sql, params or ())
-        #return st.execute()
         cursor = Cursor(self)
         cursor.execute(sql, params)
         return cursor
@@ -668,6 +645,35 @@ cdef class Connection(_callable_context_manager):
         finally:
             if callback is not None:
                 Py_DECREF(callback)
+
+    cdef _execute_internal(self, sql):
+        # Internal helper for executing BEGIN/COMMIT/ROLLBACK to avoid
+        # unnecessary cursor creation.
+        check_connection(self)
+        cdef:
+            int rc
+            Statement stmt
+        stmt = self.stmt_get(sql)
+        rc = stmt.step()
+        if rc == SQLITE_DONE:
+            stmt.reset()
+            self.stmt_release(stmt)
+        else:
+            stmt.finalize()
+            raise_sqlite_error(self.db, 'error executing query: ')
+
+    def begin(self, lock=None):
+        if lock:
+            query = f'BEGIN {lock}'
+        else:
+            query = 'BEGIN'
+        self._execute_internal(query)
+
+    def commit(self):
+        self._execute_internal('COMMIT')
+
+    def rollback(self):
+        self._execute_internal('ROLLBACK')
 
     def changes(self):
         check_connection(self)
@@ -815,29 +821,6 @@ cdef class Connection(_callable_context_manager):
     def atomic(self, lock=None):
         check_connection(self)
         return Atomic(self, lock)
-
-    cdef _execute_simple(self, sql):
-        check_connection(self)
-        cdef:
-            int rc
-            Statement stmt
-        stmt = self.stmt_get(sql)
-        rc = stmt.step()
-        if rc == SQLITE_DONE:
-            stmt.reset()
-            self.stmt_release(stmt)
-        else:
-            stmt.finalize()
-            raise_sqlite_error(self.db, 'error executing query: ')
-
-    def begin(self, lock=None):
-        self._execute_simple('BEGIN %s' % (lock or 'DEFERRED'))
-
-    def commit(self):
-        self._execute_simple('COMMIT')
-
-    def rollback(self):
-        self._execute_simple('ROLLBACK')
 
     def backup(self, Connection dest, pages=None, name=None, progress=None,
                src_name=None):
@@ -1405,10 +1388,10 @@ cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
     cdef:
         _Callback cb = <_Callback>data
         int rc
-        unicode s1 = decode(p1) if p1 != NULL else None
-        unicode s2 = decode(p2) if p2 != NULL else None
-        unicode s3 = decode(p3) if p3 != NULL else None
-        unicode s4 = decode(p4) if p4 != NULL else None
+        str s1 = decode(p1) if p1 != NULL else None
+        str s2 = decode(p2) if p2 != NULL else None
+        str s3 = decode(p3) if p3 != NULL else None
+        str s4 = decode(p4) if p4 != NULL else None
 
     try:
         rc = cb.fn(op, s1, s2, s3, s4)
@@ -1500,17 +1483,17 @@ cdef class Transaction(_callable_context_manager):
 
     def __init__(self, Connection conn, lock=None):
         self.conn = conn
-        self.lock = encode(lock or b'DEFERRED')
+        self.lock = lock
 
     def _begin(self):
-        self.conn.execute(b'BEGIN %s' % self.lock)
+        self.conn.begin(self.lock)
 
     def commit(self, begin=True):
-        self.conn.execute(b'COMMIT')
+        self.conn.commit()
         if begin: self._begin()
 
     def rollback(self, begin=True):
-        self.conn.execute(b'ROLLBACK')
+        self.conn.rollback()
         if begin: self._begin()
 
     def __enter__(self):
@@ -1537,23 +1520,23 @@ cdef class Transaction(_callable_context_manager):
 cdef class Savepoint(_callable_context_manager):
     cdef:
         Connection conn
-        bytes quoted_sid
-        bytes sid
+        object quoted_sid
+        object sid
 
     def __init__(self, Connection conn, sid=None):
         self.conn = conn
-        self.sid = encode(sid or 's' + uuid.uuid4().hex)
-        self.quoted_sid = b'"%s"' % self.sid
+        self.sid = sid or 's' + uuid.uuid4().hex
+        self.quoted_sid = '"%s"' % self.sid
 
     def _begin(self):
-        self.conn.execute(b'SAVEPOINT %s;' % self.quoted_sid)
+        self.conn._execute_internal(f'SAVEPOINT {self.quoted_sid}')
 
     def commit(self, begin=True):
-        self.conn.execute(b'RELEASE SAVEPOINT %s;' % self.quoted_sid)
+        self.conn._execute_internal(f'RELEASE SAVEPOINT {self.quoted_sid}')
         if begin: self._begin()
 
     def rollback(self):
-        self.conn.execute(b'ROLLBACK TO SAVEPOINT %s;' % self.quoted_sid)
+        self.conn._execute_internal(f'ROLLBACK TO SAVEPOINT {self.quoted_sid}')
 
     def __enter__(self):
         self._begin()
@@ -1578,7 +1561,7 @@ cdef class Atomic(_callable_context_manager):
 
     def __init__(self, Connection conn, lock=None):
         self.conn = conn
-        self.lock = encode(lock or b'DEFERRED')
+        self.lock = lock
 
     def __enter__(self):
         if self.conn._transaction_depth == 0:
