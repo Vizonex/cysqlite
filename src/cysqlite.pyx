@@ -84,6 +84,18 @@ cdef class Savepoint(object)
 cdef class Blob(object)
 
 
+ColumnMetadata = namedtuple('ColumnMetadata', (
+    'table', 'column', 'datatype', 'collation', 'not_null', 'primary_key',
+    'auto_increment'))
+Index = namedtuple('Index', ('name', 'sql', 'columns', 'unique', 'table'))
+Column = namedtuple('Column', ('name', 'data_type', 'null', 'primary_key',
+                               'table', 'default'))
+ForeignKey = namedtuple('ForeignKey', ('column', 'dest_table', 'dest_column',
+                                       'table'))
+View = namedtuple('View', ('name', 'sql'))
+SENTINEL = object()
+
+
 cdef raise_sqlite_error(sqlite3 *db, unicode msg):
     cdef:
         int code = 0
@@ -128,18 +140,6 @@ cdef inline check_statement(Statement stmt):
         raise OperationalError('Statement no longer valid!')
 
 
-ColumnMetadata = namedtuple('ColumnMetadata', (
-    'table', 'column', 'datatype', 'collation', 'not_null', 'primary_key',
-    'auto_increment'))
-Index = namedtuple('Index', ('name', 'sql', 'columns', 'unique', 'table'))
-Column = namedtuple('Column', ('name', 'data_type', 'null', 'primary_key',
-                               'table', 'default'))
-ForeignKey = namedtuple('ForeignKey', ('column', 'dest_table', 'dest_column',
-                                       'table'))
-View = namedtuple('View', ('name', 'sql'))
-SENTINEL = object()
-
-
 cdef class Statement(object):
     cdef:
         readonly Connection conn
@@ -179,6 +179,8 @@ cdef class Statement(object):
                 self.st = NULL
             raise_sqlite_error(self.conn.db, 'error compiling statement: ')
         if self._check_tail(tail):
+            sqlite3_finalize(self.st)
+            self.st = NULL
             raise ProgrammingError('Can only execute one query at a time.')
 
         self.is_dml = not sqlite3_stmt_readonly(self.st)
@@ -236,6 +238,9 @@ cdef class Statement(object):
                                          <sqlite3_uint64>(view.len),
                                          SQLITE_TRANSIENT)
                 PyBuffer_Release(&view)
+            elif hasattr(param, '__float__'):
+                # Decimal, Fraction, e.g.
+                rc = sqlite3_bind_double(self.st, i + 1, float(param))
             else:
                 if isinstance(param, datetime.datetime):
                     param = param.isoformat(' ')
@@ -252,6 +257,7 @@ cdef class Statement(object):
                                          SQLITE_UTF8)
 
             if rc != SQLITE_OK:
+                sqlite3_clear_bindings(self.st)
                 raise_sqlite_error(self.conn.db, 'error binding parameter: ')
 
     cdef int step(self):
@@ -415,6 +421,7 @@ cdef class Cursor(object):
 
             self.step_status = self.stmt.step()
             if self.step_status == SQLITE_ROW:
+                self.stmt.reset()
                 self.abort()
                 raise OperationalError('executemany() cannot generate results')
             elif self.step_status == SQLITE_DONE:
@@ -433,6 +440,7 @@ cdef class Cursor(object):
 
     def __next__(self):
         if self.conn.db == NULL:
+            self.executing = False
             raise OperationalError('Database was closed.')
         elif self.stmt and self.stmt.st == NULL:
             self.executing = False
@@ -463,6 +471,7 @@ cdef class Cursor(object):
 
     cdef abort(self):
         if self.stmt is not None:
+            self.stmt.reset()
             self.stmt.finalize()
             self.stmt = None
 
@@ -532,9 +541,9 @@ cdef class Connection(_callable_context_manager):
 
     def finalize_statements(self, finalize=True):
         cdef Statement stmt
-        for stmt in self.stmt_in_use.values():
+        for stmt in list(self.stmt_in_use.values()):
             stmt.finalize()
-        for stmt in self.stmt_available.values():
+        for stmt in list(self.stmt_available.values()):
             stmt.finalize()
 
         self.stmt_in_use.clear()
