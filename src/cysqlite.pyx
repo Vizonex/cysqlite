@@ -3,6 +3,7 @@ from cpython.bytes cimport PyBytes_AS_STRING
 from cpython.bytes cimport PyBytes_AsString
 from cpython.bytes cimport PyBytes_AsStringAndSize
 from cpython.bytes cimport PyBytes_FromStringAndSize
+from cpython.buffer cimport PyBuffer_Release
 from cpython.buffer cimport PyBUF_CONTIG_RO
 from cpython.buffer cimport PyObject_CheckBuffer
 from cpython.buffer cimport PyObject_GetBuffer
@@ -173,7 +174,7 @@ cdef class Statement(object):
 
         self.is_dml = not sqlite3_stmt_readonly(self.st)
 
-    cdef _check_tail(self, const char *tail):
+    cdef int _check_tail(self, const char *tail):
         cdef const char* pos = tail
         while pos[0] != 0:
             # Ignore whitespace and semi-colon.
@@ -183,6 +184,7 @@ cdef class Statement(object):
             else:
                 return 1
             pos += 1
+        return 0
 
     cdef bind(self, tuple params):
         cdef:
@@ -220,6 +222,7 @@ cdef class Statement(object):
                 rc = sqlite3_bind_blob64(self.st, i + 1, view.buf,
                                          <sqlite3_uint64>(view.len),
                                          SQLITE_TRANSIENT)
+                PyBuffer_Release(&view)
             else:
                 if isinstance(param, datetime.datetime):
                     param = param.isoformat(' ')
