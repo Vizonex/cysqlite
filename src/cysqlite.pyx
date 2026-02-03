@@ -392,6 +392,42 @@ cdef class Cursor(object):
 
         return self
 
+    def executemany(self, sql, seq_of_params=None):
+        if not seq_of_params:
+            raise ValueError('Cannot call executemany() without parameters.')
+        if self.conn.db == NULL:
+            self.stmt = None
+            self.executing = False
+            raise OperationalError('Database is closed.')
+        elif self.executing:
+            raise OperationalError('Cursor is already in use.')
+
+        self.description = None
+        self.rowcount = -1
+        self.lastrowid = None
+        self.executing = True
+
+        self.stmt = self.conn.stmt_get(sql)
+        for params in seq_of_params:
+            if not isinstance(params, tuple):
+                params = tuple(params)
+            self.stmt.bind(params)
+
+            self.step_status = self.stmt.step()
+            if self.step_status == SQLITE_ROW:
+                self.abort()
+                raise OperationalError('executemany() cannot generate results')
+            elif self.step_status == SQLITE_DONE:
+                self.stmt.reset()
+            else:
+                self.abort()
+                raise_sqlite_error(self.conn.db, 'error executing query: ')
+
+        self.finish()
+        self.rowcount = self.conn.changes()
+        self.lastrowid = self.conn.last_insert_rowid()
+        return self
+
     def __iter__(self):
         return self
 
@@ -642,6 +678,9 @@ cdef class Connection(_callable_context_manager):
             first_key = next(iter(self.stmt_available))
             evicted = self.stmt_available.pop(first_key)
             evicted.finalize()
+
+    def cursor(self):
+        return Cursor(self)
 
     def execute(self, sql, params=None):
         check_connection(self)

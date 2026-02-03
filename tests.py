@@ -97,6 +97,17 @@ class TestExecute(BaseTestCase):
         row = self.db.execute_one('select sum(v) from g')
         self.assertEqual(row, (6,))
 
+    def test_executemany(self):
+        self.db.execute('create table g (k, v)')
+        curs = self.db.cursor()
+        params = [('k%02d' % i, 'v%02d' % i) for i in range(100)]
+        curs.executemany('insert into g(k, v) values (?,?)', params)
+        self.assertEqual(curs.lastrowid, 100)
+
+        res = curs.execute('select k from g order by k desc').fetchall()
+        self.assertEqual(len(res), 100)
+        self.assertEqual(res[0], ('k99',))
+
 
 class TestQueryExecution(BaseTestCase):
     filename = ':memory:'
