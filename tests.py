@@ -71,14 +71,70 @@ class TestCheckConnection(BaseTestCase):
         self.assertEqual(self.db.total_changes(), 0)
         self.assertEqual(self.db.last_insert_rowid(), 0)
         self.assertTrue(self.db.autocommit())
+        cursor = self.db.cursor()
+        self.assertTrue(isinstance(cursor, Cursor))
+
+        cursor2 = self.db.cursor()
+        cursor2.execute('select 1')
 
         self.db.close()
         self.assertTrue(self.db.is_closed())
-        self.assertRaises(SqliteError, self.db.changes)
-        self.assertRaises(SqliteError, self.db.total_changes)
-        self.assertRaises(SqliteError, self.db.last_insert_rowid)
-        self.assertRaises(SqliteError, self.db.autocommit)
-        self.assertRaises(SqliteError, self.db.execute, 'select 1')
+        self.assertRaises(OperationalError, self.db.changes)
+        self.assertRaises(OperationalError, self.db.total_changes)
+        self.assertRaises(OperationalError, self.db.last_insert_rowid)
+        self.assertRaises(OperationalError, self.db.autocommit)
+        self.assertRaises(OperationalError, self.db.execute, 'select 1')
+        self.assertRaises(OperationalError, cursor.execute, 'select 1')
+        self.assertRaises(OperationalError, cursor2.fetchone)
+
+        # We can obtain a cursor, but cannot use it.
+        cursor = self.db.cursor()
+        self.assertTrue(isinstance(cursor, Cursor))
+        self.assertRaises(OperationalError, cursor.execute, 'select 1')
+
+        # We cannot reuse the cursor either afterwards.
+        self.db.connect()
+        self.assertRaises(OperationalError, cursor2.fetchone)
+
+    def test_partial_executions(self):
+        self.db.execute('create table k (data integer)')
+        curs = self.db.executemany('insert into k (data) values (?)',
+                                   [(1,), (2,), (3,)])
+        self.assertEqual(curs.rowcount, 1)
+        self.assertEqual(curs.lastrowid, 3)
+
+        curs = self.db.execute('select * from k order by data')
+        self.assertEqual(curs.fetchone(), (1,))
+        self.db.close()
+        self.assertRaises(OperationalError, curs.fetchone)
+        self.assertRaises(OperationalError, curs.fetchall)
+
+        self.db.connect()
+        self.assertRaises(OperationalError, curs.fetchone)
+        self.assertRaises(OperationalError, curs.fetchall)
+
+    def test_multiple_cursors_same_query(self):
+        self.db.execute('create table k (data integer)')
+        self.db.executemany('insert into k (data) values (?)',
+                            [(1,), (2,), (3,)])
+
+        sql = 'select * from k order by data'
+        cursors = [self.db.execute(sql) for _ in range(5)]
+        for cursor in cursors:
+            self.assertEqual(next(cursor), (1,))
+        for cursor in cursors:
+            self.assertEqual(list(cursor), [(2,), (3,)])
+
+    def test_reexecute_loop(self):
+        self.db.execute('create table k (data integer)')
+        self.db.executemany('insert into k (data) values (?)',
+                            [(1,), (2,), (3,)])
+        curs = self.db.execute('select * from k order by data')
+        self.assertRaises(OperationalError, curs.execute, 'select 1')
+
+        # We can close and re-execute, though.
+        curs.close()
+        self.assertEqual(curs.execute('select 1').value(), 1)
 
 
 class TestExecute(BaseTestCase):
@@ -141,6 +197,52 @@ class TestQueryExecution(BaseTestCase):
         with self.db.atomic():
             stmt = self.db.execute('select * from kv order by key')
             self.assertEqual([row[1:] for row in stmt], self.test_data)
+
+    def test_returning(self):
+        sql = ('insert into kv (key, value, extra) values (?,?,?), (?,?,?) '
+               'returning key')
+        curs = self.db.execute(sql, ('k4', 'v4', 4, 'k5', 'v5', 5))
+        self.assertEqual(curs.lastrowid, 5)
+        self.assertEqual(curs.fetchone(), ('k4',))
+        self.assertEqual(curs.fetchone(), ('k5',))
+
+        curs = self.db.execute(sql, ('k6', 'v6', 6, 'k7', 'v7', 7))
+        self.assertEqual(curs.lastrowid, 7)
+        curs.close()  # Abandon cursor without stepping.
+
+        self.assertEqual(self.db.execute_one('select count(*) from kv'), (7,))
+
+        sql = 'delete from kv where key in (?, ?) returning value'
+        curs = self.db.execute(sql, ('k5', 'k7'))
+        self.assertEqual(curs.rowcount, 2)
+        self.assertEqual(sorted(curs.fetchall()), [('v5',), ('v7',)])
+
+        curs = self.db.execute(sql, ('k4', 'k6'))
+        self.assertEqual(curs.rowcount, 2)
+        curs.close()
+
+        self.assertEqual(self.db.execute_one('select count(*) from kv'), (3,))
+
+        sql = ('update kv set extra = extra + 1 where key in (?, ?) '
+               'returning key, extra')
+        curs = self.db.execute(sql, ('k1', 'k2'))
+        self.assertEqual(curs.rowcount, 2)
+        self.assertEqual(sorted(curs.fetchall()), [('k1', 11), ('k2', 21)])
+
+        self.assertEqual(self.db.execute_one('select sum(extra) from kv'),
+                         (62,))
+
+        curs = self.db.execute(sql, ('k2', 'k3'))
+        self.assertEqual(curs.rowcount, 2)
+
+        # We haven't fully stepped query, but value is correct (11 + 22 + 31).
+        self.assertEqual(self.db.execute_one('select sum(extra) from kv'),
+                         (64,))
+
+        # Explicit reset of stmt. Value still looks good.
+        curs.close()
+        self.assertEqual(self.db.execute_one('select sum(extra) from kv'),
+                         (64,))
 
     def test_nested_iteration(self):
         stmt = self.db.execute('select key from kv order by key')
@@ -553,7 +655,7 @@ class TestStatementUsage(BaseTestCase):
         self.db.close()
         self.db.connect()
         self.assertRaises(OperationalError, lambda: next(curs))
-        self.assertRaises(OperationalError, lambda: curs.execute('select 1'))
+        self.assertEqual(list(curs.execute('select 1')), [(1,)])
 
     def test_statement_too_much(self):
         with self.assertRaises(ProgrammingError):

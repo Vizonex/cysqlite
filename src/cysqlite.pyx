@@ -435,7 +435,7 @@ cdef class Cursor(object):
         if self.conn.db == NULL:
             raise OperationalError('Database was closed.')
         elif self.stmt and self.stmt.st == NULL:
-            self.stmt = None
+            self.executing = False
             raise OperationalError('Statement was finalized.')
         elif not self.executing:
             raise StopIteration
@@ -686,6 +686,12 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         cursor = Cursor(self)
         cursor.execute(sql, params)
+        return cursor
+
+    def executemany(self, sql, seq_of_params):
+        check_connection(self)
+        cursor = Cursor(self)
+        cursor.executemany(sql, seq_of_params)
         return cursor
 
     def execute_one(self, sql, params=None):
