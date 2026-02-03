@@ -108,6 +108,12 @@ class TestExecute(BaseTestCase):
         self.assertEqual(len(res), 100)
         self.assertEqual(res[0], ('k99',))
 
+        self.assertRaises(ValueError, lambda: curs.executemany('select 1'))
+
+        sql = 'select * from k where id > ?'
+        self.assertRaises(OperationalError,
+                          lambda: curs.executemany(sql, [(1,), (2,)]))
+
 
 class TestQueryExecution(BaseTestCase):
     filename = ':memory:'
