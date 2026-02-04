@@ -191,6 +191,9 @@ class TestExecute(BaseTestCase):
         from decimal import Decimal
         from fractions import Fraction
 
+        buf = bytearray(b'\xff\x00\xff')
+        mv = memoryview(buf[1:])
+
         self.db.execute('create table k (data)')
         u = uuid.uuid4()
         self.db.executemany('insert into k (data) values (?)', [
@@ -198,6 +201,8 @@ class TestExecute(BaseTestCase):
             (datetime.date(2026, 2, 3),),
             (Decimal('1.23'),),
             (Fraction(3, 5),),
+            (mv,),
+            (buf,),
             (u,)])
 
         res = self.db.execute('select * from k order by data').fetchall()
@@ -206,7 +211,9 @@ class TestExecute(BaseTestCase):
             (1.23,),
             ('2026-01-02 03:04:05',),
             ('2026-02-03',),
-            (str(u),)])
+            (str(u),),
+            (b'\x00\xff',),
+            (b'\xff\x00\xff',)])
 
 
 class TestQueryExecution(BaseTestCase):
