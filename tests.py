@@ -11,6 +11,41 @@ from cysqlite import *
 
 
 SLOW_TESTS = os.environ.get('SLOW_TESTS')
+VAL_TESTS = [
+    None,
+    1,
+    -1,
+    2.5,
+    1.5e-9,
+    2147483647,
+    -2147483647,
+    2147483648,
+    -2147483648,
+    2147483999,
+    -2147483999,
+    992147483999,
+    -992147483999,
+    9223372036854775807,
+    -9223372036854775808,
+    b'\xff\x00\xfe',
+    b'\x00',
+    'a \u1234 unicode \ufe54 string \u0089',
+    '\N{MUSICAL SYMBOL G CLEF}',
+]
+_u = uuid.uuid4()
+_buf = bytearray(b'\xff\x00' * 32)
+_mv = memoryview(_buf[1:])
+VAL_CONVERSION_TESTS = [
+    (True, 1),
+    (False, 0),
+    (datetime.datetime(2026, 1, 2, 3, 4, 5), '2026-01-02 03:04:05'),
+    (datetime.date(2026, 2, 3), '2026-02-03'),
+    (Decimal('1.23'), 1.23),
+    (Fraction(3, 5), 0.6),
+    (_mv, bytes(_buf[1:])),
+    (_buf, bytes(_buf)),
+    (_u, str(_u)),
+]
 
 
 class BaseTestCase(unittest.TestCase):
@@ -265,30 +300,22 @@ class TestExecute(BaseTestCase):
         curs = self.db.execute('select n,i,r,t,b from k order by id')
         self.assertEqual(curs.fetchall(), data)
 
-    def test_execute_special_types(self):
-        buf = bytearray(b'\xff\x00\xff')
-        mv = memoryview(buf[1:])
-
+    def test_execute_inferred_types(self):
         self.db.execute('create table k (id integer primary key, data)')
-        u = uuid.uuid4()
-        self.db.executemany('insert into k (data) values (?)', [
-            (datetime.datetime(2026, 1, 2, 3, 4, 5),),
-            (datetime.date(2026, 2, 3),),
-            (Decimal('1.23'),),
-            (Fraction(3, 5),),
-            (mv,),
-            (buf,),
-            (u,)])
+        for v in VAL_TESTS:
+            self.db.execute('insert into k (data) values (?)', [v])
 
         res = self.db.execute('select data from k order by id').fetchall()
-        self.assertEqual(res, [
-            ('2026-01-02 03:04:05',),
-            ('2026-02-03',),
-            (1.23,),
-            (0.6,),
-            (b'\x00\xff',),
-            (b'\xff\x00\xff',),
-            (str(u),)])
+        self.assertEqual([val for val, in res], VAL_TESTS)
+
+    def test_execute_special_types(self):
+        self.db.execute('create table k (id integer primary key, data)')
+        for v, _ in VAL_CONVERSION_TESTS:
+            self.db.execute('insert into k (data) values (?)', [v])
+
+        res = self.db.execute('select data from k order by id').fetchall()
+        self.assertEqual([r for r, in res],
+                         [r[1] for r in VAL_CONVERSION_TESTS])
 
 
 class TestQueryExecution(BaseTestCase):
@@ -1218,23 +1245,9 @@ class DataTypes(TableFunction):
     columns = ('key', 'value')
     params = ()
     name = 'data_types'
-    stored_uuid = uuid.uuid4()
 
     def initialize(self):
-        self.values = (
-            None,
-            1,
-            2.,
-            u'unicode str',
-            b'byte str',
-            False,
-            True,
-            datetime.datetime(2026, 1, 2, 3, 4, 5),
-            datetime.date(2026, 2, 3),
-            Fraction(3, 5),
-            Decimal('1.23'),
-            self.stored_uuid)
-
+        self.values = VAL_TESTS + [v[0] for v in VAL_CONVERSION_TESTS]
         self.idx = 0
         self.n = len(self.values)
 
@@ -1247,22 +1260,10 @@ class DataTypes(TableFunction):
 class TestDataTypesTableFunction(BaseTestCase):
     def test_data_types_table_function(self):
         DataTypes.register(self.db)
-        curs = self.db.execute('SELECT key, value FROM data_types() '
+        curs = self.db.execute('SELECT value FROM data_types() '
                                'ORDER BY key')
-        self.assertEqual(list(curs ), [
-            ('k00', None),
-            ('k01', 1),
-            ('k02', 2.),
-            ('k03', u'unicode str'),
-            ('k04', b'byte str'),
-            ('k05', 0),
-            ('k06', 1),
-            ('k07', '2026-01-02 03:04:05'),
-            ('k08', '2026-02-03'),
-            ('k09', 0.6),
-            ('k10', 1.23),
-            ('k11', str(DataTypes.stored_uuid)),
-        ])
+        expected = VAL_TESTS + [v[1] for v in VAL_CONVERSION_TESTS]
+        self.assertEqual([r for r, in curs], expected)
 
 
 class Series(TableFunction):
