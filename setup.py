@@ -16,9 +16,9 @@ else:
     sources = ['src/cysqlite.c']
     cythonize = lambda obj: obj
 
-if os.path.exists('src/sqlite3.c') and os.path.exists('src/sqlite3.h'):
-    sources.append('src/sqlite3.c')
-    include_dirs = ['src/']
+if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
+    sources.append('sqlite3.c')
+    include_dirs = ['.']
     libraries = []
     define_macros = [
         ('SQLITE_ALLOW_COVERING_INDEX_SCAN', 1),
