@@ -921,8 +921,8 @@ cdef class Connection(_callable_context_manager):
             int rc = 0
             sqlite3_backup *backup
 
-        if not self.db or not dest.db:
-            raise OperationalError('source or destination database is closed')
+        if not dest.db:
+            raise OperationalError('destination database is closed')
 
         backup = sqlite3_backup_init(dest.db, bname, self.db, bsrcname)
         if backup == NULL:
@@ -2262,9 +2262,9 @@ cdef tuple sqlite_to_python(int argc, sqlite3_value **params):
 
 cdef python_to_sqlite(sqlite3_context *context, param):
     cdef:
-        bytes tmp
-        char *buf
+        const char *buf
         Py_ssize_t nbytes
+        Py_buffer view
 
     if param is None:
         sqlite3_result_null(context)
@@ -2273,23 +2273,50 @@ cdef python_to_sqlite(sqlite3_context *context, param):
     elif isinstance(param, float):
         sqlite3_result_double(context, <double>param)
     elif isinstance(param, unicode):
-        tmp = PyUnicode_AsUTF8String(param)
-        PyBytes_AsStringAndSize(tmp, &buf, &nbytes)
+        buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
+        if buf == NULL:
+            sqlite3_result_error(
+                context,
+                encode('Invalid UTF8 in text data.'),
+                -1)
+            return SQLITE_ERROR
         sqlite3_result_text64(context, buf,
                               <sqlite3_uint64>nbytes,
                               SQLITE_TRANSIENT,
                               SQLITE_UTF8)
-    elif isinstance(param, bytes):
-        PyBytes_AsStringAndSize(<bytes>param, &buf, &nbytes)
-        sqlite3_result_blob64(context, <void *>buf,
-                              <sqlite3_uint64>nbytes,
+    elif PyObject_CheckBuffer(param):
+        # bytes, bytearray, memoryview.
+        if PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO):
+            sqlite3_result_error(
+                context,
+                encode('Count not get readable buffer.'),
+                -1)
+            return SQLITE_ERROR
+        sqlite3_result_blob64(context, view.buf,
+                              <sqlite3_uint64>(view.len),
                               SQLITE_TRANSIENT)
+        PyBuffer_Release(&view)
+    elif hasattr(param, '__float__'):
+        # Decimal, Fraction, e.g.
+        sqlite3_result_double(context, float(param))
     else:
-        sqlite3_result_error(
-            context,
-            encode('Unsupported type %s' % type(param)),
-            -1)
-        return SQLITE_ERROR
+        if isinstance(param, datetime.datetime):
+            param = param.isoformat(' ')
+        elif isinstance(param, datetime.date):
+            param = param.isoformat()
+        else:
+            param = str(param)
+        buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
+        if buf == NULL:
+            sqlite3_result_error(
+                context,
+                encode('Invalid UTF8 in adapted data.'),
+                -1)
+            return SQLITE_ERROR
+        sqlite3_result_text64(context, buf,
+                              <sqlite3_uint64>nbytes,
+                              SQLITE_TRANSIENT,
+                              SQLITE_UTF8)
 
     return SQLITE_OK
 

@@ -3,6 +3,9 @@ import os
 import re
 import sys
 import unittest
+import uuid
+from decimal import Decimal
+from fractions import Fraction
 
 from cysqlite import *
 
@@ -247,10 +250,6 @@ class TestExecute(BaseTestCase):
         self.assertEqual(curs.fetchall(), data)
 
     def test_execute_special_types(self):
-        import uuid
-        from decimal import Decimal
-        from fractions import Fraction
-
         buf = bytearray(b'\xff\x00\xff')
         mv = memoryview(buf[1:])
 
@@ -872,10 +871,25 @@ class TestDatabaseSettings(BaseTestCase):
             ForeignKey('kv_id', 'kv', 'id', 'krel')])
 
 
-class TestStatementUsage(BaseTestCase):
-    def get_connection(self, **kwargs):
-        return Connection(self.filename, **kwargs)
+class TestBackup(BaseTestCase):
+    filename = ':memory:'
 
+    def test_backup(self):
+        self.db.execute('create table g (k, v)')
+        self.db.executemany('insert into g (k, v) values (?, ?)',
+                            [('k%02d' % i, 'v%02d' % i) for i in range(100)])
+        curs = self.db.cursor()
+        self.assertEqual(curs.execute('select count(*) from g').value(), 100)
+
+        new = Connection(':memory:')
+        self.assertRaises(OperationalError, self.db.backup, new)
+
+        new.connect()
+        self.db.backup(new)
+        self.assertEqual(new.execute('select count(*) from g').value(), 100)
+
+
+class TestStatementUsage(BaseTestCase):
     def test_reuse(self):
         self.create_table()  # 1 statement.
         for i in range(10):
@@ -1124,6 +1138,7 @@ class DataTypes(TableFunction):
     columns = ('key', 'value')
     params = ()
     name = 'data_types'
+    stored_uuid = uuid.uuid4()
 
     def initialize(self):
         self.values = (
@@ -1133,13 +1148,19 @@ class DataTypes(TableFunction):
             u'unicode str',
             b'byte str',
             False,
-            True)
+            True,
+            datetime.datetime(2026, 1, 2, 3, 4, 5),
+            datetime.date(2026, 2, 3),
+            Fraction(3, 5),
+            Decimal('1.23'),
+            self.stored_uuid)
+
         self.idx = 0
         self.n = len(self.values)
 
     def iterate(self, idx):
         if idx < self.n:
-            return ('k%s' % idx, self.values[idx])
+            return ('k%02d' % idx, self.values[idx])
         raise StopIteration
 
 
@@ -1149,13 +1170,18 @@ class TestDataTypesTableFunction(BaseTestCase):
         curs = self.db.execute('SELECT key, value FROM data_types() '
                                'ORDER BY key')
         self.assertEqual(list(curs ), [
-            ('k0', None),
-            ('k1', 1),
-            ('k2', 2.),
-            ('k3', u'unicode str'),
-            ('k4', b'byte str'),
-            ('k5', 0),
-            ('k6', 1),
+            ('k00', None),
+            ('k01', 1),
+            ('k02', 2.),
+            ('k03', u'unicode str'),
+            ('k04', b'byte str'),
+            ('k05', 0),
+            ('k06', 1),
+            ('k07', '2026-01-02 03:04:05'),
+            ('k08', '2026-02-03'),
+            ('k09', 0.6),
+            ('k10', 1.23),
+            ('k11', str(DataTypes.stored_uuid)),
         ])
 
 
