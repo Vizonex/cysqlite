@@ -512,6 +512,7 @@ cdef class Connection(_callable_context_manager):
         dict functions
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
+        object blob_in_use  # id(blob) -> Blob.
         int _transaction_depth
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
         _Callback _trace_hook, _progress_hook
@@ -530,6 +531,7 @@ cdef class Connection(_callable_context_manager):
         self.functions = {}
         self.stmt_available = {}
         self.stmt_in_use = weakref.WeakValueDictionary()
+        self.blob_in_use = weakref.WeakValueDictionary()
         self._transaction_depth = 0
 
         if autoconnect:
@@ -583,6 +585,11 @@ cdef class Connection(_callable_context_manager):
 
         # Drop references to user-defined functions.
         self.functions = {}
+
+        # Close all blobs.
+        for blob in list(self.blob_in_use.values()):
+            blob.close()
+        self.blob_in_use.clear()
 
         # Ensure user references to statements cannot be used after the
         # connection has been closed.
@@ -964,9 +971,9 @@ cdef class Connection(_callable_context_manager):
         self.backup(dest, pages, name, progress, src_name)
         dest.close()
 
-    def blob_open(self, table, column, rowid, read_only=False):
+    def blob_open(self, table, column, rowid, read_only=False, dbname=None):
         check_connection(self)
-        return Blob(self, table, column, rowid, read_only)
+        return Blob(self, table, column, rowid, read_only, dbname)
 
     def load_extension(self, name):
         check_connection(self)
@@ -1663,8 +1670,10 @@ cdef class Atomic(_callable_context_manager):
 
 
 cdef inline int _check_blob_closed(Blob blob) except -1:
+    if not blob.conn.db:
+        raise OperationalError('Database closed.')
     if not blob.blob:
-        raise SqliteError('Cannot operate on closed blob.')
+        raise OperationalError('Cannot operate on closed blob.')
     return 0
 
 
@@ -1673,12 +1682,14 @@ cdef class Blob(object):
         int offset
         Connection conn
         sqlite3_blob *blob
+        object __weakref__
 
     def __init__(self, Connection conn, table, column, rowid,
-                 read_only=False):
+                 read_only=False, dbname=None):
         cdef:
             bytes btable = encode(table)
             bytes bcolumn = encode(column)
+            bytes bdbname = encode(dbname or 'main')
             int flags = 0 if read_only else 1
             int rc
             sqlite3_blob *blob
@@ -1690,7 +1701,7 @@ cdef class Blob(object):
 
         rc = sqlite3_blob_open(
             self.conn.db,
-            b'main',
+            <const char *>bdbname,
             <const char *>btable,
             <const char *>bcolumn,
             <sqlite3_int64>rowid,
@@ -1698,18 +1709,20 @@ cdef class Blob(object):
             &blob)
 
         if rc != SQLITE_OK:
-            raise SqliteError('Unable to open blob "%s"."%s" row %s.' %
-                              (table, column, rowid))
+            raise OperationalError('Unable to open blob "%s"."%s" row %s.' %
+                                   (table, column, rowid))
         if blob == NULL:
             raise MemoryError('Unable to allocate blob.')
 
         self.blob = blob
         self.offset = 0
+        self.conn.blob_in_use[id(self)] = self
 
     cdef _close(self):
         if self.blob:
             sqlite3_blob_close(self.blob)
             self.blob = NULL
+            self.conn.blob_in_use.pop(id(self), None)
 
     def __dealloc__(self):
         self._close()
