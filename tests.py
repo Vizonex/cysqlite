@@ -647,6 +647,23 @@ class TestQueryExecution(BaseTestCase):
         self.assertEqual(self.db.table_column_metadata('kv', 'extra'), (
             'kv', 'extra', 'INTEGER', 'BINARY', 0, 0, 0))
 
+    def test_read_metadata(self):
+        self.assertEqual(self.db.get_tables(), ['kv'])
+        self.assertEqual(self.db.get_columns('kv'), [
+            Column('id', 'INTEGER', False, True, 'kv', None),
+            Column('key', 'TEXT', False, False, 'kv', None),
+            Column('value', 'TEXT', False, False, 'kv', None),
+            Column('extra', 'INTEGER', True, False, 'kv', None)])
+
+        self.db.execute('create unique index kv_key on kv (key desc, value)')
+        self.assertEqual(self.db.get_indexes('kv'), [
+            Index(
+                name='kv_key',
+                sql='CREATE UNIQUE INDEX kv_key on kv (key desc, value)',
+                columns=['key', 'value'],
+                unique=True,
+                table='kv')])
+
 
 class TestStatementUsage(BaseTestCase):
     def get_connection(self, **kwargs):
