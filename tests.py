@@ -347,7 +347,8 @@ class TestQueryExecution(BaseTestCase):
         self.assertEqual(curs.rowcount, 1)
         self.assertEqual(list(curs), [])  # No results.
 
-        curs = self.db.execute('insert or fail into k (key, value) '
+        # Now try an INSERT / ON CONFLICT DO NOTHING.
+        curs = self.db.execute('insert into k (key, value) '
                                'values (?, ?), (?, ?) '
                                'on conflict do nothing '
                                'returning key, value',
