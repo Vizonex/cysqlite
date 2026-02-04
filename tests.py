@@ -186,6 +186,28 @@ class TestExecute(BaseTestCase):
         curs = self.db.execute('select n,i,r,t,b from k order by id')
         self.assertEqual(curs.fetchall(), data)
 
+    def test_execute_special_types(self):
+        import uuid
+        from decimal import Decimal
+        from fractions import Fraction
+
+        self.db.execute('create table k (data)')
+        u = uuid.uuid4()
+        self.db.executemany('insert into k (data) values (?)', [
+            (datetime.datetime(2026, 1, 2, 3, 4, 5),),
+            (datetime.date(2026, 2, 3),),
+            (Decimal('1.23'),),
+            (Fraction(3, 5),),
+            (u,)])
+
+        res = self.db.execute('select * from k order by data').fetchall()
+        self.assertEqual(res, [
+            (0.6,),
+            (1.23,),
+            ('2026-01-02 03:04:05',),
+            ('2026-02-03',),
+            (str(u),)])
+
 
 class TestQueryExecution(BaseTestCase):
     filename = ':memory:'
