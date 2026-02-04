@@ -10,6 +10,9 @@ from fractions import Fraction
 from cysqlite import *
 
 
+SLOW_TESTS = os.environ.get('SLOW_TESTS')
+
+
 class BaseTestCase(unittest.TestCase):
     filename = '/tmp/cysqlite.db'
 
@@ -899,6 +902,39 @@ class TestDatabaseSettings(BaseTestCase):
         self.assertEqual(list(res), [('ANALYZE "main"."k"',)])
 
         self.assertEqual(list(conn.optimize()), [])
+
+    @unittest.skipUnless(SLOW_TESTS, 'set SLOW_TESTS=1 to run')
+    def test_for_leaks(self):
+        conn = Connection('/tmp/cysqlite.db', autoconnect=True)
+        conn.execute('create table g(k)')
+        conn.executemany('insert into g(k) values (?)', [
+            (None,),
+            (1,),
+            (2.5,),
+            ('test' * 64,),
+            (b'\x00\xff' * 64,),
+        ])
+        class Agg(object):
+            def __init__(self): self._value = 0
+            def step(self, value): self._value += (value or 0)
+            def inverse(self, value): self._value -= (value or 0)
+            def finalize(self): return self._value
+            def value(self): return self._value
+
+        for i in range(200):
+            conn = Connection('/tmp/cysqlite.db', autoconnect=True)
+            conn.create_function(lambda x: x, 'identity%d' % i)
+            conn.create_aggregate(Agg, 'agg%d' % i)
+            conn.create_window_function(Agg, 'win%d' % i)
+            conn.create_collation(lambda a, b: 1, 'coll%d' % i)
+            conn.commit_hook(lambda: 0)
+            conn.rollback_hook(lambda: 0)
+            conn.update_hook(lambda x, y, z, r: 0)
+            conn.authorizer(lambda x, y, z, r, w: 0)
+            conn.trace(lambda ev, sid, sql, ns: 0)
+            for j in range(100):
+                conn.execute('select * from g').fetchall()
+            conn.close()
 
 
 class TestBackup(BaseTestCase):
