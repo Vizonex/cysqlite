@@ -252,6 +252,11 @@ class TestQueryExecution(BaseTestCase):
             curs = self.db.execute('select * from kv order by key')
             self.assertEqual([row[1:] for row in curs], self.test_data)
 
+            # Exhausted cursor behavior.
+            self.assertEqual(list(curs), [])
+            self.assertEqual(curs.fetchall(), [])
+            self.assertTrue(curs.fetchone() is None)
+
     def test_returning(self):
         sql = ('insert into kv (key, value, extra) values (?,?,?), (?,?,?) '
                'returning key')
@@ -475,7 +480,6 @@ class TestQueryExecution(BaseTestCase):
             ('k3', 30, 233), ('k3', 101, 233), ('k3', 102, 233),
             ('k4', 1337, 1337)])
 
-    @unittest.skipIf(sys.version_info[0] == 2, 'flaky on py2')
     def test_create_collation(self):
         def case_insensitive(s1, s2):
             s1 = s1.lower()
@@ -681,6 +685,12 @@ class TestQueryExecution(BaseTestCase):
                 unique=True,
                 table='kv')])
 
+        self.db.execute('create table krel (id integer not null primary key, '
+                        'kv_id integer not null references kv(id))')
+        self.assertEqual(self.db.get_foreign_keys('kv'), [])
+        self.assertEqual(self.db.get_foreign_keys('krel'), [
+            ForeignKey('kv_id', 'kv', 'id', 'krel')])
+
 
 class TestStatementUsage(BaseTestCase):
     def get_connection(self, **kwargs):
@@ -692,6 +702,8 @@ class TestStatementUsage(BaseTestCase):
             self.create_rows(('k%s' % i, 'v%s' % i, i))  # 2nd curs.
             curs = self.db.execute('select * from kv where id > ?', (i,))  # 3.
             self.assertEqual(len(list(curs)), 1)
+
+        self.assertEqual(self.db.get_stmt_usage(), (3, 0))
 
         curs = self.db.execute('select * from kv order by key')
         self.assertEqual(self.db.get_stmt_usage(), (3, 1))
@@ -731,18 +743,17 @@ class TestStatementUsage(BaseTestCase):
 
         curs = self.db.execute('select "key" from kv order by "key"')
         self.assertEqual([row[0] for row in curs], ['k1', 'k2'])
-        self.assertEqual(self.db.get_stmt_usage(), (3, 0))
-
-        # Iterating again does not work:
-        self.assertEqual([row[0] for row in curs], [])
 
         # The statement cache now has 3 available queries (create tbl, insert,
         # and the select query, which was fully-consumed, reset and returned to
         # the cache).
         self.assertEqual(self.db.get_stmt_usage(), (3, 0))
 
-        # Re-executing the statement will pop it from the available list. It
-        # does not re-add it to "in use", though.
+        # Iterating a fully-consumed cursor APIs.
+        self.assertEqual([row[0] for row in curs], [])
+        self.assertTrue(curs.fetchone() is None)
+
+        # Re-executing the statement will pop it from the available list.
         curs = self.db.execute('select "key" from kv order by "key"')
         self.assertEqual(curs.fetchone(), ('k1',))
         self.assertEqual(self.db.get_stmt_usage(), (2, 1))
@@ -762,8 +773,8 @@ class TestStatementUsage(BaseTestCase):
         self.assertEqual(row, ('k2',))
         self.assertEqual(self.db.get_stmt_usage(), (2, 2))
 
-        # Now our original (orphaned) statement is consumed - it gets reset and
-        # put back in the available cache, but curs2 is still "in use".
+        # Now our original statement is consumed - it gets reset and put back
+        # in the available cache, but curs2 is still "in use".
         self.assertTrue(curs.fetchone() is None)
         self.assertEqual(self.db.get_stmt_usage(), (3, 1))
 
@@ -771,27 +782,6 @@ class TestStatementUsage(BaseTestCase):
         # overwriting the cached curs (since they use the same SQL).
         self.assertTrue(curs2.fetchone() is None)
         self.assertEqual(self.db.get_stmt_usage(), (3, 0))
-
-    def test_statement_reuse2(self):
-        self.create_table()
-        self.assertEqual(self.db.get_stmt_usage(), (1, 0))
-        self.create_rows(('k1', 'v1', 1))
-        self.create_rows(('k2', 'v2', 2))
-        self.assertEqual(self.db.get_stmt_usage(), (2, 0))
-
-        curs = self.db.execute('select "key" from kv order by "key"')
-        # Consume cursor, curs is returned to available statements.
-        self.assertEqual([row[0] for row in curs], ['k1', 'k2'])
-
-        # This pulls from available - need to figure out better way of managing
-        # the lifetime.
-        curs2 = self.db.execute('select "key" from kv order by "key"')
-        self.assertEqual(self.db.get_stmt_usage(), (2, 1))
-
-        curs = self.db.execute('select "key" from kv where "key" != ? '
-                               'order by "key"', ('kx',))
-        self.assertEqual(next(curs), ('k1',))
-        self.assertEqual(next(curs), ('k2',))
 
     def test_statement_after_close(self):
         curs = self.db.execute('select 1')
@@ -810,6 +800,7 @@ class TestStatementUsage(BaseTestCase):
     def test_broken_sql(self):
         self.assertRaises(OperationalError, self.db.execute, 'select')
         self.assertRaises(OperationalError, self.db.execute, 'bad query')
+        self.assertEqual(self.db.get_stmt_usage(), (0, 0))
 
 
 class TestBlob(BaseTestCase):
@@ -872,13 +863,13 @@ class TestBlob(BaseTestCase):
     def test_blob_errors_opening(self):
         rowid = self.create_blob_row(4)
 
-        with self.assertRaises(SqliteError):
+        with self.assertRaises(OperationalError):
             blob = self.db.blob_open('register', 'data', rowid + 1)
 
-        with self.assertRaises(SqliteError):
+        with self.assertRaises(OperationalError):
             blob = self.db.blob_open('register', 'missing', rowid)
 
-        with self.assertRaises(SqliteError):
+        with self.assertRaises(OperationalError):
             blob = self.db.blob_open('missing', 'data', rowid)
 
     def test_blob_operating_on_closed(self):
@@ -887,14 +878,30 @@ class TestBlob(BaseTestCase):
         self.assertEqual(len(blob), 4)
         blob.close()
 
-        with self.assertRaises(SqliteError):
+        with self.assertRaises(OperationalError):
             len(blob)
 
-        self.assertRaises(SqliteError, blob.read)
-        self.assertRaises(SqliteError, blob.write, b'foo')
-        self.assertRaises(SqliteError, blob.seek, 0, 0)
-        self.assertRaises(SqliteError, blob.tell)
-        self.assertRaises(SqliteError, blob.reopen, rowid)
+        self.assertRaises(OperationalError, blob.read)
+        self.assertRaises(OperationalError, blob.write, b'foo')
+        self.assertRaises(OperationalError, blob.seek, 0, 0)
+        self.assertRaises(OperationalError, blob.tell)
+        self.assertRaises(OperationalError, blob.reopen, rowid)
+
+    def test_blob_db_closed(self):
+        rowid = self.create_blob_row(4)
+        blob = self.db.blob_open('register', 'data', rowid)
+
+        self.db.close()
+
+        for i in range(2):
+            if i == 1: self.db.connect()  # Reconnect for 2nd iteration.
+            # Cannot operate on the blob - db was closed, even if it was
+            # reopened later the handle is invalid.
+            self.assertRaises(OperationalError, blob.read)
+            self.assertRaises(OperationalError, blob.write, b'foo')
+            self.assertRaises(OperationalError, blob.seek, 0, 0)
+            self.assertRaises(OperationalError, blob.tell)
+            self.assertRaises(OperationalError, blob.reopen, rowid)
 
     def test_blob_readonly(self):
         rowid = self.create_blob_row(4)
