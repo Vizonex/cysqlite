@@ -239,6 +239,20 @@ class TestExecute(BaseTestCase):
             curs.executemany('insert into g(k, v) values (?, ?) returning k',
                              [('kx', 1)])
 
+    def test_execute_wrong_params(self):
+        self.db.execute('create table g (k, v)')
+        q = 'insert into g (k, v) values (?, ?)'
+
+        curs = self.db.cursor()
+        for obj in (self.db, curs):
+            self.assertRaises(OperationalError, obj.execute, q)
+            self.assertRaises(OperationalError, obj.execute, q, (1,))
+            self.assertRaises(OperationalError, obj.execute, q, (1, 2, 3))
+
+            self.assertRaises(ValueError, obj.executemany, q, [])
+            self.assertRaises(OperationalError, obj.executemany, q, [(1,)])
+            self.assertRaises(OperationalError, obj.executemany, q, [(1, 2, 3)])
+
     def test_execute_datatypes(self):
         self.db.execute('create table k (id integer not null primary key, '
                         'n, i integer, r real, t text, b blob)')

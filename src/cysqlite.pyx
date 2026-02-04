@@ -371,6 +371,8 @@ cdef class Cursor(object):
             if not isinstance(params, tuple):
                 params = tuple(params)
             self.stmt.bind(params)
+        else:
+            self.stmt.bind(())
 
         self.step_status = self.stmt.step()
         if self.step_status == SQLITE_ROW:
@@ -653,14 +655,6 @@ cdef class Connection(_callable_context_manager):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-    cdef Statement prepare(self, sql, params=None):
-        cdef Statement st = self.stmt_get(sql)
-        if params:
-            if not isinstance(params, tuple):
-                params = tuple(params)
-            st.bind(params)
-        return st
 
     cdef Statement stmt_get(self, sql):
         cdef:
