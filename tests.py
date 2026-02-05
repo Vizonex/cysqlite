@@ -875,6 +875,29 @@ class TestUserDefinedCallbacks(BaseTestCase):
             ('k1', 'x1v'),
             ('k3', 'z3v')])
 
+        self.assertRaises(
+            OperationalError,
+            self.db.execute,
+            'select reverse(1)')
+
+    def test_create_function_multiple(self):
+        def add(a, b):
+            return a + b
+
+        self.db.create_function(add, 'myadd', 2)
+
+        def run(*args):
+            params = ', '.join(['?' for _ in args])
+            curs = self.db.execute('select myadd(%s)' % params, args)
+            return curs.value()
+
+        self.assertEqual(run(1, 2), 3)
+        self.assertEqual(run('a', 'bc'), 'abc')
+
+        self.assertRaises(OperationalError, lambda: run(None, 1))
+        self.assertRaises(OperationalError, lambda: run(1))
+        self.assertRaises(OperationalError, lambda: run(1, 2, 3))
+
     def test_create_aggregate(self):
         class Sum(object):
             def __init__(self): self.value = 0
