@@ -89,6 +89,20 @@ class BaseTestCase(unittest.TestCase):
         self.assertEqual([k for k, in curs], expected)
 
 
+class TestModule(unittest.TestCase):
+    def test_module_constants(self):
+        import cysqlite
+        self.assertEqual(cysqlite.apilevel, '2.0')
+        self.assertEqual(cysqlite.paramstyle, 'qmark')
+        self.assertTrue(cysqlite.threadsafety in (0, 1, 3))
+        self.assertTrue(isinstance(cysqlite.version, str))
+        self.assertTrue(isinstance(cysqlite.version_info, tuple))
+        self.assertTrue(isinstance(cysqlite.sqlite_version, str))
+        self.assertTrue(isinstance(cysqlite.sqlite_version_info, tuple))
+        self.assertEqual(cysqlite.C_SQLITE_OK, 0)
+        self.assertEqual(cysqlite.C_SQLITE_ERROR, 1)
+
+
 class TestOpenConnection(unittest.TestCase):
     def tearDown(self):
         for filename in glob.glob('/tmp/cysqlite-*'):
@@ -180,11 +194,12 @@ class TestCheckConnection(BaseTestCase):
                             [(1,), (2,), (3,)])
 
         sql = 'select * from k order by data'
-        cursors = [self.db.execute(sql) for _ in range(5)]
-        for cursor in cursors:
-            self.assertEqual(next(cursor), (1,))
-        for cursor in cursors:
-            self.assertEqual(list(cursor), [(2,), (3,)])
+        for _ in range(2):
+            cursors = [self.db.execute(sql) for _ in range(5)]
+            for cursor in cursors:
+                self.assertEqual(next(cursor), (1,))
+            for cursor in cursors:
+                self.assertEqual(list(cursor), [(2,), (3,)])
 
     def test_reexecute_loop(self):
         self.db.execute('create table k (data integer)')
@@ -211,27 +226,38 @@ class TestExecute(BaseTestCase):
                                ('k1', 1, 'k2', 2))
         self.assertEqual(curs.lastrowid, 2)
         self.assertEqual(curs.rowcount, 2)
+        self.assertTrue(curs.description is None)
 
         curs = self.db.executemany('insert into g (k, v) values (?, ?)',
                                    [('k3', 3), ('k4', 4), ('k5', 5)])
         self.assertEqual(curs.lastrowid, 5)
         self.assertEqual(curs.rowcount, 3)  # Summed by executemany().
+        self.assertTrue(curs.description is None)
 
         curs = self.db.execute('update g set v = v + ? where v < ?', (10, 3))
         self.assertEqual(curs.lastrowid, 5)  # Retained by conn.
         self.assertEqual(curs.rowcount, 2)
+        self.assertTrue(curs.description is None)
 
         curs = self.db.execute('update g set v = v + ? where v < ?', (100, 1))
         self.assertEqual(curs.lastrowid, 5)  # Retained by conn.
         self.assertEqual(curs.rowcount, 0)
+        self.assertTrue(curs.description is None)
 
         curs = self.db.execute('delete from g where v < ?', (6,))
         self.assertEqual(curs.lastrowid, 5)  # Retained by conn.
         self.assertEqual(curs.rowcount, 3)
+        self.assertTrue(curs.description is None)
 
         curs = self.db.execute('select * from g')
         self.assertTrue(curs.lastrowid is None)  # Read queries don't get this.
         self.assertEqual(curs.rowcount, -1)
+        self.assertEqual(curs.description, (('k',), ('v',)))
+
+        curs = self.db.execute('select 1, 2 as two, 3 as "t h.r-e e"')
+        self.assertTrue(curs.lastrowid is None)  # Read queries don't get this.
+        self.assertEqual(curs.rowcount, -1)
+        self.assertEqual(curs.description, (('1',), ('two',), ('t h.r-e e',)))
 
     def test_execute(self):
         self.db.execute('create table g (k, v)')
@@ -250,6 +276,14 @@ class TestExecute(BaseTestCase):
 
         curs = self.db.execute('select sum(v) from g')
         self.assertEqual(curs.value(), 6)
+
+        curs = self.db.execute('select * from g')
+        curs.close()
+
+        # Maybe should raise error here - not sure.
+        self.assertTrue(curs.fetchone() is None)
+        self.assertEqual(curs.fetchall(), [])
+        self.assertEqual(list(curs), [])
 
     def test_executemany(self):
         self.db.execute('create table g (k, v)')
@@ -511,6 +545,66 @@ class TestQueryExecution(BaseTestCase):
                 inner.append(key_i)
         self.assertEqual(outer, ['k1'])
         self.assertEqual(inner, ['k2', 'k3'])
+
+
+class TestQueryTypes(BaseTestCase):
+    filename = ':memory:'
+
+    def test_ddl_queries(self):
+        e = self.db.execute
+        e('create table g (k, v)')
+        e('create table if not exists g (k, v)')
+        self.assertEqual(self.db.get_tables(), ['g'])
+
+        e('alter table g add column x')
+        self.assertEqual([c.name for c in self.db.get_columns('g')],
+                         ['k', 'v', 'x'])
+
+        e('create index g_k on g(k)')
+        self.assertEqual([i.name for i in self.db.get_indexes('g')], ['g_k'])
+
+        e('drop index g_k')
+        e('create unique index ug_k on g(k)')
+        self.assertEqual([i.name for i in self.db.get_indexes('g')], ['ug_k'])
+
+        e('create view vs as select v from g')
+        self.assertEqual([v.name for v in self.db.get_views()], ['vs'])
+        e('drop view vs')
+        self.assertEqual([v.name for v in self.db.get_views()], [])
+
+        e('drop table g')
+        e('drop table if exists g')
+        self.assertEqual(self.db.get_tables(), [])
+
+    def test_dml_queries(self):
+        e = self.db.execute
+        e('create table g(k, v)')
+        e('insert into g(k, v) values (?, ?)', ('k1', 1))
+        e('insert into g(k, v) values (?, ?), (?, ?)', ('k2', 2, 'k3', 3))
+        e('update g set v = v + 10 where k = ?', ('k1',))
+        e('delete from g where v <= ?', (2,))
+
+        curs = e('select * from g order by v')
+        self.assertEqual(curs.fetchall(), [('k3', 3), ('k1', 11)])
+
+    def test_constraints(self):
+        e = self.db.execute
+        e('create table g (id integer not null primary key, '
+          'k text not null unique, v integer check(v >= 0))')
+
+        def ins(k, v):
+            e('insert into g (k, v) values (?, ?)', (k, v))
+
+        ins('k1', 1)  # OK.
+
+        with self.assertRaises(IntegrityError):  # PK violation.
+            e('insert into g (id, k, v) values (?, ?, ?)', (1, 'k2', 2))
+        with self.assertRaises(IntegrityError):  # unique violation.
+            ins('k1', 2)
+        with self.assertRaises(IntegrityError):  # check violation.
+            ins('k2', -1)
+        with self.assertRaises(IntegrityError):  # not null violation.
+            ins(None, 3)
 
 
 class TestRowFactory(BaseTestCase):
@@ -985,6 +1079,7 @@ class TestUserDefinedCallbacks(BaseTestCase):
 
 class TestDatabaseSettings(BaseTestCase):
     filename = ':memory:'
+
     def setUp(self):
         super(TestDatabaseSettings, self).setUp()
         self.create_table()
