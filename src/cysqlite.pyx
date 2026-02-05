@@ -173,11 +173,14 @@ cdef class Statement(object):
             rc = sqlite3_prepare_v2(self.conn.db, zsql, <int>nbytes,
                                     &(self.st), &tail)
 
-        if rc != SQLITE_OK:
+        # When sqlite3_prepare_v2 is called with empty SQL no error is reported
+        # but ppStmt will be NULL.
+        if rc != SQLITE_OK or self.st == NULL:
             if self.st:
                 sqlite3_finalize(self.st)
                 self.st = NULL
             raise_sqlite_error(self.conn.db, 'error compiling statement: ')
+
         if self._check_tail(tail):
             sqlite3_finalize(self.st)
             self.st = NULL

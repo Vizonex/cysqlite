@@ -318,6 +318,45 @@ class TestExecute(BaseTestCase):
         self.assertEqual([r for r, in res],
                          [r[1] for r in VAL_CONVERSION_TESTS])
 
+    def test_empty_query(self):
+        self.assertRaises(SqliteError, self.db.execute, '')
+        self.assertRaises(SqliteError, self.db.execute, '    ')
+
+    def test_very_long_query(self):
+        columns = ', '.join(['%d as col%d' % (i, i) for i in range(1000)])
+        res = self.db.execute('SELECT %s' % columns).fetchone()
+        self.assertEqual(len(res), 1000)
+
+    def test_very_long_string(self):
+        self.db.execute('CREATE TABLE test (data TEXT)')
+        long_string = 'x' * 1000000  # 1MB string
+        self.db.execute('INSERT INTO test VALUES (?)', (long_string,))
+        res = self.db.execute('SELECT data FROM test').fetchone()
+        self.assertEqual(len(res[0]), 1000000)
+
+    def test_special_characters_in_table_name(self):
+        self.db.execute('CREATE TABLE "table-with-dashes" (id INTEGER)')
+        self.db.execute('INSERT INTO "table-with-dashes" VALUES (1)')
+        res, = self.db.execute('SELECT * FROM "table-with-dashes"').fetchone()
+        self.assertEqual(res, 1)
+
+    def test_reserved_word_as_column_name(self):
+        self.db.execute('CREATE TABLE test ("select" INTEGER)')
+        self.db.execute('INSERT INTO test VALUES (1)')
+        res, = self.db.execute('SELECT "select" FROM test').fetchone()
+        self.assertEqual(res, 1)
+
+    def test_zero_rows(self):
+        self.db.execute('CREATE TABLE test (id INTEGER)')
+        res = self.db.execute('SELECT * FROM test').fetchone()
+        self.assertTrue(res is None)
+
+    def test_null_in_primary_key(self):
+        self.db.execute('CREATE TABLE test (id INTEGER PRIMARY KEY)')
+        self.db.execute('INSERT INTO test VALUES (NULL)')
+        res, = self.db.execute('SELECT id FROM test').fetchone()
+        self.assertTrue(res is not None)
+
 
 class TestQueryExecution(BaseTestCase):
     filename = ':memory:'
