@@ -80,6 +80,7 @@ class NotSupportedError(DatabaseError): pass
 cdef class _Callback(object)
 cdef class Statement(object)
 cdef class Cursor(object)
+cdef class Row(object)
 cdef class Transaction(object)
 cdef class Savepoint(object)
 cdef class Blob(object)
@@ -139,6 +140,92 @@ cdef inline check_connection(Connection conn):
 cdef inline check_statement(Statement stmt):
     if stmt.st == NULL:
         raise OperationalError('Statement no longer valid!')
+
+
+cdef class Row(object):
+    cdef:
+        tuple _data
+        object _description
+        dict _name_map
+
+    def __cinit__(self, Cursor cursor, tuple data):
+        self._data = data
+        self._description = cursor.description
+        self._name_map = None
+
+    cdef _build_name_map(self):
+        if self._name_map is None:
+            self._name_map = {}
+            if self._description:
+                for idx, col_desc in enumerate(self._description):
+                    col_name = col_desc[0]
+                    # Only store reference to first occurrence of name.
+                    if col_name not in self._name_map:
+                        self._name_map[col_name] = idx
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._data[key]
+        elif isinstance(key, str):
+            self._build_name_map()
+            if key not in self._name_map:
+                raise KeyError('No column named "%s"' % key)
+            return self._data[self._name_map[key]]
+        raise TypeError('__getitem__ accepts index or string key')
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError('Invalid lookup')
+
+        self._build_name_map()
+        if name not in self._name_map:
+            raise AttributeError('Row object has no attribute "%s"' % name)
+        return self._data[self._name_map[name]]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
+
+    def __repr__(self):
+        if self._description:
+            parts = []
+            for idx, col in enumerate(self._description):
+                parts.append('%s=%s' % (col[0], repr(self._data[idx])))
+            return '<Row(%s)>' % ', '.join(parts)
+        else:
+            return '<Row(%s)>' % repr(self._data)
+
+    def __eq__(self, other):
+        if isinstance(other, Row):
+            return self._data == other._data
+        elif isinstance(other, tuple):
+            return self._data == other
+        raise NotImplementedError
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self._data)
+
+    def keys(self):
+        if self._description:
+            return [col[0] for col in self._description]
+        return []
+
+    def values(self):
+        return list(self._data)
+
+    def items(self):
+        if self._description:
+            return [(col[0], self._data[idx])
+                    for idx, col in enumerate(self._description)]
+        return []
+
+    def as_dict(self):
+        return dict(self.items())
 
 
 @cython.internal
@@ -344,6 +431,7 @@ cdef class Cursor(object):
         readonly tuple description
         readonly object lastrowid
         readonly int rowcount
+        object row_factory
         Statement stmt
         bint executing
         int step_status
@@ -353,6 +441,7 @@ cdef class Cursor(object):
         self.stmt = None
         self.executing = False
         self.description = None
+        self.row_factory = conn.row_factory
 
     cdef set_description(self):
         self.description = tuple([(name,) for name in self.stmt.columns()])
@@ -458,7 +547,15 @@ cdef class Cursor(object):
         else:
             self.abort()
             raise_sqlite_error(self.conn.db, 'error executing query: ')
-        return row
+        return self._build_row(row)
+
+    cdef _build_row(self, tuple data):
+        if self.row_factory is not None:
+            try:
+                return self.row_factory(self, data)
+            except Exception as exc:
+                raise OperationalError('row_factory failed: %s' % exc)
+        return data
 
     cdef finish(self):
         if self.stmt is not None:
@@ -507,6 +604,8 @@ cdef class Connection(_callable_context_manager):
         public float timeout
         public str database
         public str vfs
+        public object row_factory
+
         # List of statements, transactions, savepoints, blob handles?
         dict functions
         dict stmt_available  # sql -> Statement.
@@ -517,7 +616,8 @@ cdef class Connection(_callable_context_manager):
         _Callback _trace_hook, _progress_hook
 
     def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
-                 cached_statements=100, extensions=True, autoconnect=False):
+                 cached_statements=100, extensions=True, row_factory=None,
+                 autoconnect=True):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
@@ -525,6 +625,7 @@ cdef class Connection(_callable_context_manager):
         self.uri = uri
         self.cached_statements = cached_statements
         self.extensions = extensions
+        self.row_factory = row_factory
 
         self.db = NULL
         self.functions = {}
@@ -2185,7 +2286,8 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
 
 
 def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
-            cached_statements=100, extensions=True, autoconnect=True):
+            cached_statements=100, extensions=True, row_factory=None,
+            autoconnect=True):
     """Open a connection to an SQLite database."""
     conn = Connection(database,
                       flags=flags,
@@ -2194,6 +2296,7 @@ def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
                       uri=uri,
                       cached_statements=cached_statements,
                       extensions=extensions,
+                      row_factory=row_factory,
                       autoconnect=autoconnect)
     return conn
 

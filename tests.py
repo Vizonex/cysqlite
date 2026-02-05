@@ -111,7 +111,7 @@ class TestOpenConnection(unittest.TestCase):
                       '/tmp/cysqlite-test.db')
 
     def test_open_close(self):
-        db = Connection(':memory:')
+        db = Connection(':memory:', autoconnect=False)
         self.assertTrue(db.is_closed())
         self.assertTrue(db.connect())
         self.assertFalse(db.is_closed())
@@ -512,6 +512,88 @@ class TestQueryExecution(BaseTestCase):
         self.assertEqual(outer, ['k1'])
         self.assertEqual(inner, ['k2', 'k3'])
 
+
+class TestRowFactory(BaseTestCase):
+    filename = ':memory:'
+
+    def setUp(self):
+        super(TestRowFactory, self).setUp()
+        self.create_table()
+        self.create_rows(('k1', 'v1', 1), ('k2', 'v2', 2), ('k3', 'v3', 3))
+        self.r1 = [('id', 1), ('key', 'k1'), ('value', 'v1'), ('extra', 1)]
+
+    def test_default(self):
+        curs = self.db.execute('select * from kv')
+        self.assertTrue(isinstance(curs.fetchone(), tuple))
+        self.assertTrue(isinstance(next(curs), tuple))
+        self.assertTrue(isinstance(curs.fetchall()[0], tuple))
+
+    def test_row(self):
+        self.db.row_factory = Row
+        curs = self.db.execute('select * from kv order by key')
+        r1 = curs.fetchone()
+        r2 = next(curs)
+        r3 = curs.fetchall()[0]
+
+        self.assertTrue(all(isinstance(r, Row) for r in (r1, r2, r3)))
+
+        self.assertEqual(r1.keys(), [k for k, v in self.r1])
+        self.assertEqual(r1.values(), [v for k, v in self.r1])
+        self.assertEqual(r1.items(), self.r1)
+        self.assertEqual(r1.as_dict(), dict(self.r1))
+        self.assertEqual(list(r1), [v for k, v in self.r1])
+
+        self.assertEqual(r1.key, 'k1')
+        self.assertEqual(r1[1], 'k1')
+        self.assertEqual(r1['key'], 'k1')
+
+        self.assertRaises(AttributeError, lambda: r1.x)
+        self.assertRaises(KeyError, lambda: r1['x'])
+        self.assertRaises(TypeError, lambda: r1[None])
+
+    def test_custom_factory(self):
+        def dict_factory(cursor, row):
+            return {d[0]: v for (d, v) in zip(cursor.description, row)}
+
+        self.db.row_factory = dict_factory
+        curs = self.db.execute('select * from kv order by key')
+        r1 = curs.fetchone()
+        r2 = next(curs)
+        r3 = curs.fetchall()[0]
+
+        self.assertTrue(all(isinstance(r, dict) for r in (r1, r2, r3)))
+
+        self.assertEqual(sorted(r1.keys()), sorted([k for k, v in self.r1]))
+        self.assertEqual(sorted(r1.items()), sorted(self.r1))
+        self.assertEqual(r1, dict(self.r1))
+
+    def test_row_factory_stable(self):
+        self.db.row_factory = Row
+        curs = self.db.execute('select * from kv limit 1')
+
+        self.db.row_factory = None
+        curs2 = self.db.execute('select * from kv limit 1')
+
+        self.db.row_factory = Row
+        curs3 = self.db.execute('select * from kv limit 1')
+
+        self.assertTrue(isinstance(curs.fetchone(), Row))
+        self.assertTrue(isinstance(curs2.fetchone(), tuple))
+        self.assertTrue(isinstance(curs3.fetchone(), Row))
+
+    def test_row_failure(self):
+        i = 0
+        def error_factory(cursor, row):
+            nonlocal i
+            if i == 0:
+                i = 1
+                return row
+            raise ValueError
+
+        self.db.row_factory = error_factory
+        curs = self.db.execute('select * from kv order by key')
+        self.assertEqual(curs.fetchone(), tuple(v for k, v in self.r1))
+        self.assertRaises(OperationalError, curs.fetchone)
 
 
 class TestTransactions(BaseTestCase):
@@ -1025,7 +1107,7 @@ class TestBackup(BaseTestCase):
         curs = self.db.cursor()
         self.assertEqual(curs.execute('select count(*) from g').value(), 100)
 
-        new = Connection(':memory:')
+        new = Connection(':memory:', autoconnect=False)
         self.assertRaises(OperationalError, self.db.backup, new)
 
         new.connect()
