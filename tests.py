@@ -1931,9 +1931,8 @@ class Split(TableFunction):
             return result
         raise StopIteration
 
-
-class MemoryTable(TableFunction):
-    name = 'memory_store'
+class MemStore(TableFunction):
+    name = 'memstore'
     columns = [
         ('id', 'INTEGER'),
         ('key', 'TEXT'),
@@ -1959,11 +1958,11 @@ class MemoryTable(TableFunction):
         # rowid might be None, so we auto-generate
         if rowid is None:
             rowid = self._next_id
-            MemoryTable._next_id += 1
+            MemStore._next_id += 1
         else:
             rowid = int(rowid)
-            if rowid >= MemoryTable._next_id:
-                MemoryTable._next_id = rowid + 1
+            if rowid >= MemStore._next_id:
+                MemStore._next_id = rowid + 1
 
         if len(values) < 3:
             raise ValueError('Expected 3 values, got %s' % len(values))
@@ -1988,6 +1987,8 @@ class MemoryTable(TableFunction):
             raise ValueError('Expected 3 values, got %s' % len(values))
 
         uid, key, value = values
+        if uid:
+            new_rowid = uid
 
         if old_rowid != new_rowid:
             self._data[new_rowid] = self._data.pop(old_rowid)
@@ -2037,6 +2038,15 @@ class TestTableFunction(BaseTestCase):
             ('zaizee diary', 'zaizee'),
             ('zaizee diary', 'diary'),
         ])
+
+    def test_readonly_behavior(self):
+        Split.register(self.db)
+        with self.assertRaises(OperationalError):
+            self.execute('insert into str_split (part) values (?)', ('k1',))
+        with self.assertRaises(OperationalError):
+            self.execute('update str_split set part = ?', ('k1',))
+        with self.assertRaises(OperationalError):
+            self.execute('delete from str_split')
 
     def test_series(self):
         Series.register(self.db)
@@ -2119,40 +2129,52 @@ class TestTableFunction(BaseTestCase):
         ])
 
     def test_writeable(self):
-        MemoryTable.register(self.db)
-        curs = self.db.execute('insert into memory_store (id, key, value) '
+        MemStore.register(self.db)
+        curs = self.db.execute('insert into memstore (id, key, value) '
                                'values (?, ?, ?)', (1, 'k1', 'v1'))
         self.assertEqual(curs.lastrowid, 1)
         self.assertEqual(self.db.last_insert_rowid(), 1)
 
-        curs = self.db.execute('insert into memory_store (key, value) '
+        curs = self.db.execute('insert into memstore (key, value) '
                                'values (?, ?), (?, ?)',
                                ('k2', 'v2', 'k3', 'v3'))
         self.assertEqual(curs.lastrowid, 3)
         self.assertEqual(self.db.last_insert_rowid(), 3)
 
         def assertValues(*expected):
-            res = self.db.execute('select * from memory_store order by key')
+            res = self.db.execute('select * from memstore order by key')
             self.assertEqual(res.fetchall(), list(expected))
 
         assertValues((1, 'k1', 'v1'), (2, 'k2', 'v2'), (3, 'k3', 'v3'))
 
-        curs = self.db.execute('update memory_store set value = ? '
+        curs = self.db.execute('update memstore set value = ? '
                                'where key = ?', ('v2y', 'k2'))
         assertValues((1, 'k1', 'v1'), (2, 'k2', 'v2y'), (3, 'k3', 'v3'))
 
-        self.db.execute('update memory_store set value = value || ?', ('zz',))
-        self.db.execute('update memory_store set value = NULL where key = ?',
+        self.db.execute('update memstore set value = value || ?', ('zz',))
+        self.db.execute('update memstore set value = NULL where key = ?',
                         ('xyz',))
         assertValues((1, 'k1', 'v1zz'), (2, 'k2', 'v2yzz'), (3, 'k3', 'v3zz'))
 
-        self.db.execute('delete from memory_store where key = ?', ('k2',))
-        assertValues((1, 'k1', 'v1zz'), (3, 'k3', 'v3zz'))
+        self.db.execute('update memstore set id = ? where id = ?',
+                        (4, 3))
+        assertValues((1, 'k1', 'v1zz'), (2, 'k2', 'v2yzz'), (4, 'k3', 'v3zz'))
 
-        self.db.execute('delete from memory_store where key = ?', ('k2',))
-        assertValues((1, 'k1', 'v1zz'), (3, 'k3', 'v3zz'))
+        self.db.execute('delete from memstore where key = ?', ('k2',))
+        assertValues((1, 'k1', 'v1zz'), (4, 'k3', 'v3zz'))
 
-        self.db.execute('delete from memory_store')
+        self.db.execute('delete from memstore where key = ?', ('k2',))
+        assertValues((1, 'k1', 'v1zz'), (4, 'k3', 'v3zz'))
+
+        self.db.execute('update memstore set value = ? where id = ?',
+                        ('v3', 4))
+        assertValues((1, 'k1', 'v1zz'), (4, 'k3', 'v3'))
+
+        res = self.db.execute('select rowid, id, key from memstore '
+                              'order by id').fetchall()
+        self.assertEqual(res, [(1, 1, 'k1'), (4, 4, 'k3')])
+
+        self.db.execute('delete from memstore')
         assertValues()
 
     def test_error_instantiate(self):
