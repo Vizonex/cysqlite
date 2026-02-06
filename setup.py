@@ -16,6 +16,12 @@ else:
     sources = ['src/cysqlite.c']
     cythonize = lambda obj: obj
 
+compile_args = ['-O3', '-Wall'] if sys.platform != 'win32' else ['/O2']
+if os.environ.get('DEBUG') and sys.platform != 'win32':
+    compile_args = ['-O0', '-Wall']
+
+link_args = []
+
 if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
     sources.append('sqlite3.c')
     include_dirs = ['.']
@@ -37,15 +43,27 @@ if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
         ('SQLITE_TEMP_STORE', 3),
         ('SQLITE_MAX_VARIABLE_NUMBER', 250000),
         ('SQLITE_MAX_MMAP_SIZE', 2**40),
+        ('inline', '__inline'),
     ]
+    if os.environ.get('SQLCIPHER'):
+        define_macros.extend([
+            ('SQLITE_HAS_CODEC', '1'),
+            ('SQLITE_TEMP_STORE', '2'),
+            ('SQLITE_THREADSAFE', '1'),
+            ('SQLITE_EXTRA_INIT', 'sqlcipher_extra_init'),
+            ('SQLITE_EXTRA_SHUTDOWN', 'sqlcipher_extra_shutdown'),
+            ('HAVE_STDINT_H', '1'),
+        ])
+        if sys.platform == 'win32':
+            link_args.extend([
+                'WS2_32.LIB', 'GDI32.LIB', 'ADVAPI32.LIB', 'CRYPT32.LIB',
+                'USER32.LIB', 'libcrypto.lib'])
+        else:
+            link_args.extend(['-lcrypto'])
 else:
     include_dirs = []
     libraries = ['sqlite3']
     define_macros = []
-
-compile_args = ['-O3', '-Wall'] if sys.platform != 'win32' else ['/O2']
-if os.environ.get('DEBUG'):
-    compile_args = ['-O0', '-Wall']
 
 cysqlite_extension = Extension(
     'cysqlite',
@@ -53,6 +71,7 @@ cysqlite_extension = Extension(
     include_dirs=include_dirs,
     libraries=libraries,
     define_macros=define_macros,
-    extra_compile_args=compile_args)
+    extra_compile_args=compile_args,
+    extra_link_args=link_args)
 
 setup(ext_modules=cythonize([cysqlite_extension]))
