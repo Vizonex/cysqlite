@@ -1059,7 +1059,7 @@ cdef class Connection(_callable_context_manager):
                     sqlite3_sleep(250)
             elif rc == SQLITE_DONE:
                 break
-            else:
+            elif rc != SQLITE_OK:
                 sqlite3_backup_finish(backup)
                 raise_sqlite_error(dest.db, 'error backing up database: ')
 
@@ -2335,7 +2335,7 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
             pIdxInfo.estimatedRows = 10
         else:
             # Penalize score based on number of missing params.
-            pIdxInfo.estimatedCost = <double>10000000000000 * <double>(nParams - nArg)
+            pIdxInfo.estimatedCost = DBL_MAX - <double>(nParams - nArg)
             pIdxInfo.estimatedRows = 10 * (nParams - nArg)
 
         # Store a reference to the columns in the index info structure.
