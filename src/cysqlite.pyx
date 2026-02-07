@@ -594,6 +594,11 @@ cdef class Cursor(object):
         finally:
             self.finish()
 
+    def columns(self):
+        if self.description is None:
+            self.set_description()
+        return [row[0] for row in self.description]
+
 
 cdef class Connection(_callable_context_manager):
     cdef:
@@ -2443,6 +2448,8 @@ cdef class _TableFunctionImpl(object):
 
     def __cinit__(self, table_function):
         self.table_function = table_function
+        if not table_function.name:
+            table_function.name = table_function.__name__
 
     cdef create_module(self, Connection conn):
         check_connection(conn)

@@ -246,7 +246,7 @@ Connection
 
       Begin a transaction.
 
-      If a transaction is already active, raises :py:class:`OperationalError`.
+      If a transaction is already active, raises :class:`OperationalError`.
 
       :param str lock: type of SQLite lock to acquire, ``DEFERRED`` (default),
          ``IMMEDIATE``, or ``EXCLUSIVE``.
@@ -279,7 +279,7 @@ Connection
 
       Commit the currently-active transaction.
 
-      If no transaction is active, raises :py:class:`OperationalError`.
+      If no transaction is active, raises :class:`OperationalError`.
 
       .. seealso:: :meth:`Connection.atomic`
 
@@ -287,7 +287,7 @@ Connection
 
       Roll-back the currently-active transaction.
 
-      If no transaction is active, raises :py:class:`OperationalError`.
+      If no transaction is active, raises :class:`OperationalError`.
 
       .. seealso:: :meth:`Connection.atomic`
 
@@ -705,7 +705,7 @@ Connection
          # Backup the contents of master to replica.db.
          master.backup_to_file('replica.db')
 
-   .. method:: blob_open(table, column, rowid, read_only=False, dbname=None)
+   .. method:: blob_open(table, column, rowid, read_only=False, database=None)
 
       Open a :class:`Blob` handle to an existing :abbr:`BLOB (Binary Large OBject)`.
 
@@ -713,7 +713,7 @@ Connection
       :param str column: column where blob is stored.
       :param int rowid: id of row to open.
       :param bool read_only: open blob in read-only mode.
-      :param str dbname: database name, *optional*.
+      :param str database: database name, *optional*.
       :return: a handle to access the BLOB data.
       :rtype: :class:`Blob`
 
@@ -1161,6 +1161,11 @@ Cursor
 
    :param Connection conn: connection the cursor is bound to.
 
+   .. attribute:: row_factory
+
+      Factory for creating row instances from query results, e.g. :class:`Row`.
+      Uses the value from the :attr:`Connection.row_factory` by default.
+
    .. method:: execute(sql, params=None)
 
       Execute the given *sql* and *params*.
@@ -1252,7 +1257,7 @@ Cursor
          print(curs.fetchone())  # (1,)
          print(curs.fetchone())  # None
 
-   .. py:method:: fetchall()
+   .. method:: fetchall()
 
       Fetch all rows from the query result set. By default rows are returned as
       ``tuple``, but row type can be controlled by setting
@@ -1268,7 +1273,7 @@ Cursor
          print(curs.fetchall())  # [(1,)]
          print(curs.fetchall())  # []
 
-   .. py:method:: value()
+   .. method:: value()
 
       Fetch a single scalar value from the query result set. If no results are
       available or cursor has been consumed returns ``None``.
@@ -1281,7 +1286,7 @@ Cursor
          print(curs.value())  # 1
          print(curs.value())  # None
 
-   .. py:method:: close()
+   .. method:: close()
 
       Close the cursor and release associated resources.
 
@@ -1290,6 +1295,324 @@ Cursor
          It is not necessary to explicitly close a cursor. Cursors will be
          closed during garbage collection automatically.
 
+   .. method:: columns()
+
+      Return a list of the names of columns in the result data.
+
+   .. attribute:: description
+
+      Return a DB-API style description of the row-data for the current query.
+      cysqlite returns a list of tuples containing the individual column names
+      for the query.
+
+   .. attribute:: lastrowid
+
+      Return the last-inserted rowid for the cursor.
+
+   .. attribute:: rowcount
+
+      Return the count of rows modified by the last operation. Returns ``-1``
+      for queries that do not modify data.
+
+Row
+---
+
+.. class:: Row(cursor, data)
+
+   :param Cursor cursor:
+   :param tuple data:
+
+   Highly-optimized row class compatible with ``sqlite3.Row``, intended to be
+   used with :attr:`Connection.row_factory` or :attr:`Cursor.row_factory`.
+   Supports the following access patterns:
+
+   * Item lookup using column indices.
+   * Dict lookup using column names.
+   * Attribute access using attribute names.
+
+   Additionally supports dict-like interface methods.
+
+   .. method:: __len__()
+               __eq__()
+               keys()
+               values()
+               items()
+               as_dict()
+
+   Example:
+
+   .. code-block:: python
+
+      db = cysqlite.connect('app.db')
+      db.row_factory = cysqlite.Row
+
+      curs = db.execute('select * from users')
+      row = curs.fetchone()
+
+      print(row)
+      # <Row(id=1, username='charles', active=1)>
+
+      print(row.username)
+      # charles
+
+      print(row['active'])
+      # 1
+
+      print(row[0])
+      # 1
+
+      print(list(row))
+      # [1, 'charles', 1]
+
+Blob
+----
+
+.. class:: Blob(conn, table, column, rowid, read_only=False, database=None)
+
+    Open a blob handle, stored in the given table/column/row, for incremental
+    I/O. To allocate storage for new data, you can use the SQL ``zeroblob(n)``
+    function, where *n* is the desired size in bytes.
+
+    :param conn: :class:`Connection` instance.
+    :param str table: Name of table being accessed.
+    :param str column: Name of column being accessed.
+    :param int rowid: Primary-key of row being accessed.
+    :param bool read_only: Prevent any modifications to the blob data.
+    :param str database: Name of database containing table, *optional*.
+
+    .. code-block:: python
+
+       db = connect(':memory:')
+       db.execute('create table raw_data (id integer primary key, data blob)')
+
+       # Allocate 100MB of space for writing a large file incrementally:
+       db.execute('insert into raw_data (data) values (zeroblob(?))',
+                  (1024 * 1024 * 100,))
+       rowid = db.last_insert_rowid()
+
+       # Now we can open the row for incremental I/O:
+       blob = Blob(db, 'rawdata', 'data', rowid)
+
+       # Read from the file and write to the blob in chunks of 4096 bytes.
+       while True:
+           data = file_handle.read(4096)
+           if not data:
+               break
+           blob.write(data)
+
+       bytes_written = blob.tell()
+       blob.close()
+
+   .. method:: read(n=None)
+
+      :param int n: Only read up to *n* bytes from current position in file.
+
+      Read up to *n* bytes from the current position in the blob file. If *n*
+      is not specified, the entire blob will be read.
+
+   .. method:: seek(offset, frame_of_reference=0)
+
+      :param int offset: Seek to the given offset in the file.
+      :param int frame_of_reference: Seek relative to the specified frame of reference.
+
+      Values for ``whence``:
+
+      * ``0``: beginning of file
+      * ``1``: current position
+      * ``2``: end of file
+
+      Attempts to seek beyond the start or end of the file raise ``ValueError``.
+
+   .. method:: tell()
+
+      Return current offset within the file.
+
+   .. method:: write(data)
+
+      :param bytes data: Data to be written
+
+      Writes the given data, starting at the current position in the file. If
+      the data is too large for the blob to store, raises ``ValueError``.
+
+   .. method:: close()
+
+      Close the file and free associated resources.
+
+   .. method:: reopen(rowid)
+
+      :param int rowid: Primary key of row to open.
+
+      If a blob has already been opened for a given table/column, you can use
+      the :meth:`~Blob.reopen` method to re-use the same :class:`Blob`
+      object for accessing multiple rows in the table.
+
+TableFunction
+-------------
+
+Implement a user-defined table-valued function. Unlike :meth:`Connection.create_function`
+or :meth:`Connection.create_aggregate`, which return a single scalar value, a
+table-valued function can return any number of rows of tabular data.
+
+Example:
+
+.. code-block:: python
+
+   from cysqlite import TableFunction
+
+   class Series(TableFunction):
+       name = 'series'  # Specify name - if empty class name is used.
+
+       # Name of columns in each row of generated data.
+       columns = ['value']
+
+       # Name of parameters the function may be called with.
+       params = ['start', 'stop', 'step']
+
+       def initialize(self, start=0, stop=None, step=1):
+           """
+           Table-functions declare an initialize() method, which is
+           called with whatever arguments the user has called the
+           function with.
+           """
+           self.start = self.current = start
+           self.stop = stop or float('Inf')
+           self.step = step
+
+       def iterate(self, idx):
+           """
+           Iterate is called repeatedly by the SQLite database engine
+           until the required number of rows has been read **or** the
+           function raises a `StopIteration` signalling no more rows
+           are available.
+           """
+           if self.current > self.stop:
+               raise StopIteration
+
+           ret, self.current = self.current, self.current + self.step
+           return (ret,)
+
+   # Register the table-function with our database.
+   db = connect(':memory:')
+   Series.register(db)
+
+   # Usage:
+   cursor = db.execute('select * from series(?, ?, ?)', (0, 5, 2))
+   for row in cursor:
+       print(row)
+   # (0,)
+   # (2,)
+   # (4,)
+
+.. note::
+   A :class:`TableFunction` must be registered with a database connection
+   before it can be used.
+
+.. class:: TableFunction
+
+   :class:`TableFunction` implementations must provide two attributes and
+   implement two methods, described below.
+
+   .. attribute:: columns
+
+      A list containing the names of the columns for the data returned by the
+      function. For example, a function that is used to split a string on a
+      delimiter might specify 3 columns: ``[substring, start_idx, end_idx]``.
+
+      To specify data-types for your columns, you can specify a list of
+      2-tuples of ``(column name, type)``, e.g.:
+
+      .. code-block:: python
+
+         columns = [('key', 'text'), ('data', 'blob')]
+
+   .. attribute:: params
+
+      The names of the parameters the function may be called with. All
+      parameters, including optional parameters, should be listed. For
+      example, a function that is used to split a string on a delimiter might
+      specify 2 params: ``[string, delimiter]``.
+
+   .. attribute:: name
+
+      *Optional* - specify the name for the table function. If not provided,
+      name will be taken from the class name.
+
+   .. attribute:: print_tracebacks = True
+
+      Print a full traceback for any errors that occur in the table-function's
+      callback methods. When set to False, only the generic
+      :class:`OperationalError` will be visible.
+
+   .. method:: initialize(**parameter_values)
+
+       :param parameter_values: Parameters the function was called with.
+       :returns: No return value.
+
+       The ``initialize`` method is called to initialize the table function
+       with the parameters the user specified when calling the function.
+
+   .. method:: iterate(idx)
+
+       :param int idx: current iteration step, or more specifically rowid.
+       :returns: A tuple of row data corresponding to the columns named
+           in the :attr:`~TableFunction.columns` attribute.
+       :raises StopIteration: To signal that no more rows are available.
+
+       This function is called repeatedly and returns successive rows of data.
+       The function may terminate before all rows are consumed (especially if
+       the user specified a ``LIMIT`` on the results). Alternatively, the
+       function can signal that no more data is available by raising a
+       ``StopIteration`` exception.
+
+   .. method:: insert(rowid, values)
+
+      :param int rowid: rowid for inserted data, may be ``None``.
+      :param list values: values to be inserted.
+      :return: rowid of new data.
+      :rtype: int
+
+      Handle INSERT into the virtual table.
+
+      If omitted, the virtual table will not support INSERT queries.
+
+   .. method:: update(old_rowid, new_rowid, values)
+
+      :param int old_rowid: rowid for data being updated.
+      :param int new_rowid: new rowid for data (usually same as old_rowid).
+      :param list values: values to be updated.
+      :return: no return value.
+
+      Handle UPDATE of a row in the virtual table.
+
+      If omitted, the virtual table will not support UPDATE queries.
+
+   .. method:: delete(rowid)
+
+      :param int rowid: rowid to be deleted.
+      :return: no return value.
+
+      Handle DELETE of a row in the virtual table.
+
+      If omitted, the virtual table will not support DELETE queries.
+
+   .. classmethod:: register(conn)
+
+       :param Connection conn: Connection to register table function.
+
+       Register the table function with the :class:`Connection`. Table-valued
+       functions **must** be registered before they can be used in a query.
+
+       Example:
+
+       .. code-block:: python
+
+           class MyTableFunction(TableFunction):
+               name = 'my_func'
+               # ... other attributes and methods ...
+
+           db = connect(':memory:')
+
+           MyTableFunction.register(db)
 
 Exceptions
 ----------
