@@ -140,6 +140,16 @@ class TestOpenConnection(unittest.TestCase):
             self.assertFalse(db.is_closed())
         self.assertTrue(db.is_closed())
 
+    def test_limit(self):
+        db = Connection(':memory:')
+        limit = db.getlimit(C_SQLITE_LIMIT_LENGTH)
+        self.assertTrue(limit > 0)
+
+        db.setlimit(C_SQLITE_LIMIT_LENGTH, limit - 1)
+
+        limit2 = db.getlimit(C_SQLITE_LIMIT_LENGTH)
+        self.assertEqual(limit2, limit - 1)
+
 
 class TestCheckConnection(BaseTestCase):
     filename = ':memory:'

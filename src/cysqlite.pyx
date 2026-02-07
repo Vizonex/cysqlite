@@ -1380,13 +1380,25 @@ cdef class Connection(_callable_context_manager):
             bname = encode(name)
             zDb = bname
 
-        rc = sqlite3_wal_checkpoint_v2(self.db, zDb, mode, &pnLog, &pnCkpt)
+        with nogil:
+            rc = sqlite3_wal_checkpoint_v2(self.db, zDb, mode, &pnLog, &pnCkpt)
+
         if rc == SQLITE_MISUSE:
             raise OperationalError('error: misuse - cannot perform checkpoint')
         elif rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error performing checkpoint: ')
 
         return (pnLog, pnCkpt)
+
+    def setlimit(self, category, int limit):
+        check_connection(self)
+        rc = sqlite3_limit(self.db, category, limit)
+        if rc < 0:
+            raise ProgrammingError('category is out of bounds')
+        return rc
+    def getlimit(self, category):
+        return self.setlimit(category, -1)
+
 
 
 cdef class _Callback(object):
@@ -3175,3 +3187,16 @@ C_SQLITE_OPEN_FULLMUTEX = SQLITE_OPEN_FULLMUTEX
 C_SQLITE_OPEN_SHAREDCACHE = SQLITE_OPEN_SHAREDCACHE
 C_SQLITE_OPEN_PRIVATECACHE = SQLITE_OPEN_PRIVATECACHE
 C_SQLITE_OPEN_WAL = SQLITE_OPEN_WAL
+
+C_SQLITE_LIMIT_LENGTH = SQLITE_LIMIT_LENGTH
+C_SQLITE_LIMIT_SQL_LENGTH = SQLITE_LIMIT_SQL_LENGTH
+C_SQLITE_LIMIT_COLUMN = SQLITE_LIMIT_COLUMN
+C_SQLITE_LIMIT_EXPR_DEPTH = SQLITE_LIMIT_EXPR_DEPTH
+C_SQLITE_LIMIT_COMPOUND_SELECT = SQLITE_LIMIT_COMPOUND_SELECT
+C_SQLITE_LIMIT_VDBE_OP = SQLITE_LIMIT_VDBE_OP
+C_SQLITE_LIMIT_FUNCTION_ARG = SQLITE_LIMIT_FUNCTION_ARG
+C_SQLITE_LIMIT_ATTACHED = SQLITE_LIMIT_ATTACHED
+C_SQLITE_LIMIT_LIKE_PATTERN_LENGTH = SQLITE_LIMIT_LIKE_PATTERN_LENGTH
+C_SQLITE_LIMIT_VARIABLE_NUMBER = SQLITE_LIMIT_VARIABLE_NUMBER
+C_SQLITE_LIMIT_TRIGGER_DEPTH = SQLITE_LIMIT_TRIGGER_DEPTH
+C_SQLITE_LIMIT_WORKER_THREADS = SQLITE_LIMIT_WORKER_THREADS

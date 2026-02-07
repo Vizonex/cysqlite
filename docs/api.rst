@@ -747,6 +747,27 @@ Connection
 
          blob.close()  # Release the blob handle.
 
+   .. method:: load_extension(name)
+
+      Load an extension module from a shared library.
+
+      :param str name: the path to the SQLite extension.
+      :raises: :class:`OperationalError` if extension could not be loaded.
+
+      Example:
+
+      .. code-block:: python
+
+         # Create connection and indicate we want to support loadable
+         # extensions.
+         db = connect(':memory:', extensions=True)
+
+         # Alternately, we can enable loadable extensions later.
+         db.set_load_extension(True)
+
+         # Load the closure table extension.
+         db.load_extension('./closure.so')
+
    .. method:: create_function(fn, name=None, nargs=-1, deterministic=True)
 
       Create or remove a user-defined SQL function.
@@ -1150,6 +1171,24 @@ Connection
 
       See `sqlite3_wal_checkpoint_v2 <https://sqlite.org/c3ref/wal_checkpoint_v2.html>`_
       for details on the parameters and their behavior.
+
+   .. method:: set_load_extension(enabled)
+   .. method:: get_load_extension()
+
+      Enable or disable run-time loadable extensions.
+
+   .. method:: set_foreign_keys_enabled(enabled)
+   .. method:: get_foreign_keys_enabled()
+
+      Enable or disable foreign-key constraint enforcement. For historical
+      reasons, many builds of SQLite do not ship with foreign-key constraints
+      enabled by default.
+
+   .. method:: set_triggers_enabled(enabled)
+   .. method:: get_triggers_enabled()
+
+      Enable or disable triggers from being executed.
+
 
 Cursor
 ------
@@ -1837,3 +1876,23 @@ Operations reported to authorizer callback.
           C_SQLITE_SAVEPOINT
           C_SQLITE_COPY
           C_SQLITE_RECURSIVE
+
+Limit Constants
+^^^^^^^^^^^^^^^
+
+.. seealso::
+   Setting and getting limits.
+      :meth:`Connection.setlimit` :meth:`Connection.getlimit`
+
+.. data:: C_SQLITE_LIMIT_LENGTH
+          C_SQLITE_LIMIT_SQL_LENGTH
+          C_SQLITE_LIMIT_COLUMN
+          C_SQLITE_LIMIT_EXPR_DEPTH
+          C_SQLITE_LIMIT_COMPOUND_SELECT
+          C_SQLITE_LIMIT_VDBE_OP
+          C_SQLITE_LIMIT_FUNCTION_ARG
+          C_SQLITE_LIMIT_ATTACHED
+          C_SQLITE_LIMIT_LIKE_PATTERN_LENGTH
+          C_SQLITE_LIMIT_VARIABLE_NUMBER
+          C_SQLITE_LIMIT_TRIGGER_DEPTH
+          C_SQLITE_LIMIT_WORKER_THREADS
