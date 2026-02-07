@@ -1501,7 +1501,7 @@ Implement a user-defined table-valued function. Unlike :meth:`Connection.create_
 or :meth:`Connection.create_aggregate`, which return a single scalar value, a
 table-valued function can return any number of rows of tabular data.
 
-Example:
+Example read-only :class:`TableFunction`:
 
 .. code-block:: python
 
@@ -1550,6 +1550,142 @@ Example:
    # (0,)
    # (2,)
    # (4,)
+
+Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
+
+.. code-block:: python
+
+   class MemStore(TableFunction):
+       """
+       In-memory key/value store exposed as a virtual-table.
+       """
+       name = 'memstore'
+       columns = [
+           ('id', 'INTEGER'),
+           ('key', 'TEXT'),
+           ('value', 'TEXT')]
+       params = []
+
+       _data = {}
+       _next_id = 1
+
+       def initialize(self, **filters):
+           pass
+
+       def iterate(self, idx):
+           keys = sorted(self._data)
+           if idx >= len(keys):
+               raise StopIteration
+
+           rowid = keys[idx]
+           row = self._data[rowid]
+
+           # Return a 2-tuple of (rowid, row-data) to specify rowid explicitly.
+           return (rowid, (row['id'], row['key'], row['value']))
+
+       def insert(self, rowid, values):
+           # rowid might be None, so we auto-generate
+           if rowid is None:
+               rowid = self._next_id
+               MemStore._next_id += 1
+           else:
+               rowid = int(rowid)
+               if rowid >= MemStore._next_id:
+                   MemStore._next_id = rowid + 1
+
+           if len(values) < 3:
+               raise ValueError('Expected 3 values, got %s' % len(values))
+
+           u_rowid, key, value = values
+           self._data[rowid] = {
+               'id': int(u_rowid) if u_rowid is not None else rowid,
+               'key': str(key) if key is not None else key,
+               'value': str(value) if value is not None else value,
+           }
+
+           return rowid
+
+       def update(self, old_rowid, new_rowid, values):
+           old_rowid = int(old_rowid)
+           new_rowid = int(new_rowid)
+
+           if old_rowid not in self._data:
+               raise ValueError('Row %s not found' % old_rowid)
+
+           if len(values) < 3:
+               raise ValueError('Expected 3 values, got %s' % len(values))
+
+           uid, key, value = values
+           if uid:
+               new_rowid = uid
+
+           if old_rowid != new_rowid:
+               # User updated rowid, move data.
+               self._data[new_rowid] = self._data.pop(old_rowid)
+               rowid = new_rowid
+           else:
+               rowid = old_rowid
+
+           if uid:
+               self._data[rowid]['id'] = int(uid)
+           if key is not None:
+               self._data[rowid]['key'] = key
+           if value is not None:
+               self._data[rowid]['value'] = value
+
+       def delete(self, rowid):
+           rowid = int(rowid)
+           if rowid not in self._data:
+               raise ValueError('Row %s not found' % rowid)
+           del self._data[rowid]
+
+   # Register the table-function with our database.
+   db = connect(':memory:')
+   MemStore.register(db)
+
+   # Usage:
+   db.execute('insert into memstore (id, key, value) values (?, ?, ?)',
+              (1, 'k1', 'v1'))
+   db.execute('insert into memstore (key, value) values (?, ?), (?, ?)',
+              ('k2', 'v2', 'k3', 'v3'))
+
+   assert db.last_insert_rowid() == 3
+
+   for row in db.execute('select * from memstore where value != ?' ('v2',)):
+       print(row)
+
+   # (1, 'k1', 'v1')
+   # (3, 'k3', 'v3')
+
+   db.execute('update memstore set value = ? where key = ?', ('v2y', 'k2'))
+   db.execute('update memstore set value = value || ?', ('z',))
+
+   for row in db.execute('select * from memstore'):
+       print(row)
+
+   # (1, 'k1', 'v1z')
+   # (2, 'k2', 'v1yz')
+   # (3, 'k3', 'v3z')
+
+   db.execute('delete from memstore where key = ?', ('k2',))
+   assert db.changes() == 1
+
+   db.execute('update memstore set id = ? where id = ?', (4, 3))
+   assert db.changes() == 1
+
+   db.execute('delete from memstore where key = ?', ('not-here',))
+   assert db.changes() == 0
+
+   for row in db.execute('select * from memstore'):
+       print(row)
+
+   # (1, 'k1', 'v1z')
+   # (4, 'k3', 'v3z')
+
+   print(MemStore._data)
+   # {1: {'id': 1, 'key': 'k1', 'value': 'v1z'},
+   #  4: {'id': 4, 'key': 'k3', 'value': 'v3z'}}
+
 
 .. note::
    A :class:`TableFunction` must be registered with a database connection
@@ -1604,6 +1740,9 @@ Example:
        :param int idx: current iteration step, or more specifically rowid.
        :returns: A tuple of row data corresponding to the columns named
            in the :attr:`~TableFunction.columns` attribute.
+
+           Implementations may explicitly specify a ``rowid`` by returning a
+           2-tuple of ``(rowid, (row, data, here))``.
        :raises StopIteration: To signal that no more rows are available.
 
        This function is called repeatedly and returns successive rows of data.
