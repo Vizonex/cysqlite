@@ -431,7 +431,7 @@ cdef class Cursor(object):
         readonly tuple description
         readonly object lastrowid
         readonly int rowcount
-        object row_factory
+        public object row_factory
         Statement stmt
         bint executing
         int step_status
@@ -1083,9 +1083,9 @@ cdef class Connection(_callable_context_manager):
         self.backup(dest, pages, name, progress, src_name)
         dest.close()
 
-    def blob_open(self, table, column, rowid, read_only=False, dbname=None):
+    def blob_open(self, table, column, rowid, read_only=False, database=None):
         check_connection(self)
-        return Blob(self, table, column, rowid, read_only, dbname)
+        return Blob(self, table, column, rowid, read_only, database)
 
     def load_extension(self, name):
         check_connection(self)
@@ -1874,11 +1874,11 @@ cdef class Blob(object):
         object __weakref__
 
     def __init__(self, Connection conn, table, column, rowid,
-                 read_only=False, dbname=None):
+                 read_only=False, database=None):
         cdef:
             bytes btable = encode(table)
             bytes bcolumn = encode(column)
-            bytes bdbname = encode(dbname or 'main')
+            bytes bdatabase = encode(database or 'main')
             int flags = 0 if read_only else 1
             int rc
             sqlite3_blob *blob
@@ -1890,7 +1890,7 @@ cdef class Blob(object):
 
         rc = sqlite3_blob_open(
             self.conn.db,
-            <const char *>bdbname,
+            <const char *>bdatabase,
             <const char *>btable,
             <const char *>bcolumn,
             <sqlite3_int64>rowid,
