@@ -1364,7 +1364,9 @@ cdef class Connection(_callable_context_manager):
             int pnLog, pnCkpt  # Size of WAL in frames, total num checkpointed.
             int rc
 
-        if full:
+        if full and truncate:
+            raise ValueError('full and truncate are mutually exclusive.')
+        elif full:
             mode = SQLITE_CHECKPOINT_FULL
         elif truncate:
             mode = SQLITE_CHECKPOINT_TRUNCATE
