@@ -1189,6 +1189,15 @@ Connection
 
       Enable or disable triggers from being executed.
 
+   .. method:: setlimit(category, limit)
+               getlimit(category)
+
+      Set or get the value of a run-time limit. Limits are defined by the
+      :ref:`limit-constants`.
+
+      See `sqlite3 run-time limit categories <https://www.sqlite.org/c3ref/c_limit_attached.html#sqlitelimitattached>`_
+      for details.
+
 
 Cursor
 ------
@@ -1876,6 +1885,8 @@ Operations reported to authorizer callback.
           C_SQLITE_SAVEPOINT
           C_SQLITE_COPY
           C_SQLITE_RECURSIVE
+
+.. _limit-constants:
 
 Limit Constants
 ^^^^^^^^^^^^^^^
