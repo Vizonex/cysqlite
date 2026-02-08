@@ -819,11 +819,9 @@ cdef class Connection(_callable_context_manager):
         # Remove oldest statement from the cache - relies on Python 3.6
         # dictionary retaining insertion order. For older python, will simply
         # remove a random key, which is also fine.
-        cdef Statement evicted
-
-        while len(self.stmt_available) > self.cached_statements:
+        if len(self.stmt_available) > self.cached_statements:
             first_key = next(iter(self.stmt_available))
-            evicted = self.stmt_available.pop(first_key)
+            evicted = <Statement>self.stmt_available.pop(first_key)
             evicted.finalize()
 
     def cursor(self):
