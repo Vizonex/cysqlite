@@ -1801,6 +1801,134 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
 
            MyTableFunction.register(db)
 
+Helpers
+-------
+
+cysqlite includes a handful of miscellaneous helpers for various things that
+may come up when you're using SQLite.
+
+.. function:: rank_bm25(...)
+
+   `Okapi BM25 <https://en.wikipedia.org/wiki/Okapi_BM25>`_ ranking algorithm
+   for use with SQLite full-text search extensions (FTS4 and FTS5 only).
+
+   Parameters are opaque as function is intended to be called with the output
+   of the SQLite `matchinfo(table, 'pcnalx')` function, which provides the
+   required metadata needed to rank the search results.
+
+   .. warning::
+        You must specify ``'pcnalx'`` as the output format for ``matchinfo()``
+        to ensure that the statistics are read from the index correctly.
+
+   Usage:
+
+   .. code-block:: python
+
+      # Create an FTS4 virtual table to search.
+      db.execute('create virtual table search using fts4 '
+                 '(title, content, tokenize="porter")')
+
+      # Insert sample data into search index.
+      db.execute(
+          'insert into search (docid, title, content) values (?, ?, ?)',
+          (1, 'some title', 'text I wish to search'))
+
+      # Register the bm25 rank function.
+      db.create_function(rank_bm25)
+
+      # Perform search and rank results using BM25. The title will be
+      # weighted as 2x more important than the body content, for example.
+      # Search results are returned sorted most-relevant first.
+      curs = db.execute("""
+          select docid, title,
+                 rank_bm25(matchinfo(search, ?), ?, ?) as score
+          from search where search match ?
+          order by score""",
+          ('pcnalx', 2.0, 1.0, search_query))
+
+      for docid, title, score in curs:
+          print('Document "%s" matched - score %s' % (title, score))
+
+      # No weighting, both columns equally scored. Results returned
+      # most-relevant first.
+      curs = db.execute("""
+          select docid, title,
+                 rank_bm25(matchinfo(search, ?)) as score
+          from search where search match ?
+          order by score""",
+          ('pcnalx', search_query))
+
+      for docid, title, score in curs:
+          print('Document "%s" matched - score %s' % (title, score))
+
+.. function:: rank_lucene(...)
+
+   Works similarly to :func:`rank_bm25` but uses a slightly different algorithm
+   derived from Lucene. See the above section on :func:`rank_bm25` for usage
+   example.
+
+.. function:: levenshtein_dist(a, b)
+
+   C implementation of `Levenshtein Distance <https://en.wikipedia.org/wiki/Levenshtein_distance>`_
+   algorithm for comparing similarity of two strings. Useful for fuzzy matching
+   of strings.
+
+   Usage:
+
+   .. code-block:: python
+
+      db = connect(':memory:')
+
+      db.create_function(levenshtein_dist, 'levdist')
+
+      print(db.execute_scalar(
+          'select levdist(?, ?)',
+          ('cysqlite', 'cyqslite'))
+      # 2.
+
+.. function:: damerau_levenshtein_dist(a, b)
+
+   C implementation of `Damerau Levenshtein Distance <https://en.wikipedia.org/wiki/Damerau%E2%80%93Levenshtein_distance>`_
+   algorithm for comparing similarity of two strings. Useful for fuzzy matching
+   of strings.
+
+   Usage:
+
+   .. code-block:: python
+
+      db = connect(':memory:')
+
+      db.create_function(damerau_levenshtein_dist, 'dlevdist')
+
+      print(db.execute_scalar(
+          'select dlevdist(?, ?)',
+          ('cysqlite', 'cyqslite'))
+      # 1.
+
+.. class:: median()
+
+   C implementation of an **aggregate** and **window** function that calculates
+   the median of a sequence of values.
+
+   Usage:
+
+   .. code-block:: python
+
+      db = connect(':memory:')
+
+      db.create_window_function(median)
+
+      # Get the employee salaries along w/median salary for their dept.
+      curs = db.execute_scalar("""
+          select
+            department,
+            employee,
+            salary,
+            median(salary) over (partition by department) '
+          from employees
+          order by department""")
+
+
 Exceptions
 ----------
 

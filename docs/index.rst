@@ -20,6 +20,9 @@ cysqlite supports standalone builds or dynamic-linking with the system SQLite.
    If you are looking for a SQLite driver which exposes the full surface-area
    of SQLite APIs, ``apsw`` is the best choice.
 
+.. note::
+   cysqlite is well-supported by `peewee ORM <https://docs.peewee-orm.com/>`_.
+
 Example usage:
 
 .. code-block:: python
@@ -46,4 +49,5 @@ Example usage:
    :caption: Contents:
 
    installation
+   sqlite-notes
    api
