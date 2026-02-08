@@ -204,7 +204,6 @@ Connection
 
          db.execute('create table kv ("id" integer primary key, "key", "value")')
 
-         # Iterate over results from a bulk-insert.
          curs = db.executemany('insert into kv (key, value) values (?, ?)',
                                [('k1', 'v1'), ('k2', 'v2'), ('k3', 'v3')])
          print(curs.lastrowid)  # 3.
@@ -1278,7 +1277,6 @@ Cursor
 
          curs.execute('create table kv ("id" integer primary key, "key", "value")')
 
-         # Iterate over results from a bulk-insert.
          curs.executemany('insert into kv (key, value) values (?, ?)',
                           [('k1', 'v1'), ('k2', 'v2'), ('k3', 'v3')])
          print(curs.lastrowid)  # 3.
