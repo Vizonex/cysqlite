@@ -157,7 +157,7 @@ Connection
 
       :param str sql: SQL query to execute.
       :param params: parameters for query (optional).
-      :type params: tuple, list, sequence, or ``None``.
+      :type params: tuple, list, sequence, dict, or ``None``.
       :return: cursor object.
       :rtype: :class:`Cursor`
 
@@ -173,8 +173,8 @@ Connection
          for (i, k) in curs:
              print(f'inserted {k} with id={i}')
 
-         # Retrieve a single row result.
-         curs = db.execute('select * from kv where id = ?', (1, ))
+         # Retrieve a single row result. Use a named parameter.
+         curs = db.execute('select * from kv where id = :pk', {'pk': 1})
          row = curs.fetchone()
          print(f'retrieved row 1: {row}')
 
@@ -194,7 +194,7 @@ Connection
       :param str sql: SQL query to execute.
       :param seq_of_params: iterable of parameters to repeatedly execute the
         query with.
-      :type params: tuple, list, or sequence.
+      :type seq_of_params: sequence of: tuple, list, sequence, or dict.
       :return: cursor object.
       :rtype: :class:`Cursor`
 
@@ -210,6 +210,11 @@ Connection
          print(curs.lastrowid)  # 3.
          print(curs.rowcount)  # 3.
 
+         curs = db.executemany('insert into kv (key, value) values (:k, :v)',
+                               [{'k': 'k4', 'v': 'v4'}, {'k': 'k5', 'v': 'v5'}])
+         print(curs.lastrowid)  # 5.
+         print(curs.rowcount)  # 2.
+
    .. method:: execute_one(sql, params=None)
 
       Create a new :class:`Cursor` and call :meth:`~Cursor.execute` with the
@@ -217,7 +222,7 @@ Connection
 
       :param str sql: SQL query to execute.
       :param params: parameters for query (optional).
-      :type params: tuple, list, sequence, or ``None``.
+      :type params: tuple, list, sequence, dict, or ``None``.
       :return: a single row of data or ``None`` if no results.
 
       Example:
@@ -225,6 +230,9 @@ Connection
       .. code-block:: python
 
          row = db.execute_one('select * from users where id = ?', (1,))
+
+         row = db.execute_one('select * from users where name = :username',
+                              {'username': 'charlie'})
 
    .. method:: execute_scalar(sql, params=None)
 
@@ -235,7 +243,7 @@ Connection
 
       :param str sql: SQL query to execute.
       :param params: parameters for query (optional).
-      :type params: tuple, list, sequence, or ``None``.
+      :type params: tuple, list, sequence, dict, or ``None``.
       :return: a single value or ``None`` if no result.
 
       .. code-block:: python
@@ -1220,7 +1228,7 @@ Cursor
 
       :param str sql: SQL query to execute.
       :param params: parameters for query (optional).
-      :type params: tuple, list, sequence, or ``None``.
+      :type params: tuple, list, sequence, dict, or ``None``.
       :return: self
       :rtype: :class:`Cursor`
 
@@ -1239,7 +1247,7 @@ Cursor
              print(f'inserted {k} with id={i}')
 
          # Retrieve a single row result.
-         curs.execute('select * from kv where id = ?', (1, ))
+         curs.execute('select * from kv where id = :pk', {'pk': 1})
          row = curs.fetchone()
          print(f'retrieved row 1: {row}')
 
@@ -1258,7 +1266,7 @@ Cursor
       :param str sql: SQL query to execute.
       :param seq_of_params: iterable of parameters to repeatedly execute the
         query with.
-      :type params: tuple, list, or sequence.
+      :type seq_of_params: sequence of tuple, list, sequence, dict, or ``None``.
       :return: self
       :rtype: :class:`Cursor`
 
@@ -1275,6 +1283,11 @@ Cursor
                           [('k1', 'v1'), ('k2', 'v2'), ('k3', 'v3')])
          print(curs.lastrowid)  # 3.
          print(curs.rowcount)  # 3.
+
+         curs.executemany('insert into kv (key, value) values (:k, :v)',
+                          [{'k': 'k4', 'v': 'v4'}, {'k': 'k5', 'v': 'v5'}])
+         print(curs.lastrowid)  # 5.
+         print(curs.rowcount)  # 2.
 
    .. method:: __iter__()
                __next__()
