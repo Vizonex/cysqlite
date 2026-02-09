@@ -232,7 +232,7 @@ cdef class Row(object):
 @cython.internal
 cdef class Statement(object):
     cdef:
-        readonly Connection conn
+        Connection conn
         sqlite3_stmt *st
         bint is_dml
         bytes sql
@@ -478,7 +478,7 @@ cdef class Cursor(object):
     cdef set_description(self):
         self.description = tuple([(name,) for name in self.stmt.columns()])
 
-    def execute(self, sql, params=None):
+    cpdef execute(self, sql, params=None):
         if self.conn.db == NULL:
             self.stmt = None
             self.executing = False
@@ -516,7 +516,7 @@ cdef class Cursor(object):
 
         return self
 
-    def executemany(self, sql, seq_of_params=None):
+    cpdef executemany(self, sql, seq_of_params=None):
         if not seq_of_params:
             raise ValueError('Cannot call executemany() without parameters.')
         if self.conn.db == NULL:
@@ -605,16 +605,16 @@ cdef class Cursor(object):
     def close(self):
         self.finish()
 
-    def fetchone(self):
+    cpdef fetchone(self):
         try:
             return next(self)
         except StopIteration:
             return
 
-    def fetchall(self):
+    cpdef fetchall(self):
         return list(self)
 
-    def value(self):
+    cpdef value(self):
         try:
             return next(self)[0]
         except StopIteration:
@@ -831,13 +831,13 @@ cdef class Connection(_callable_context_manager):
 
     def execute(self, sql, params=None):
         check_connection(self)
-        cursor = Cursor(self)
+        cdef Cursor cursor = Cursor(self)
         cursor.execute(sql, params)
         return cursor
 
     def executemany(self, sql, seq_of_params):
         check_connection(self)
-        cursor = Cursor(self)
+        cdef Cursor cursor = Cursor(self)
         cursor.executemany(sql, seq_of_params)
         return cursor
 
