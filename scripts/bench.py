@@ -26,7 +26,7 @@ def test_bind(db):
     params = tuple(params)
 
     with measure(db, 'bind'):
-        for i in range(20000):
+        for i in range(10000):
             db.execute(sql, params)
 
 def test_bind_small(db):
@@ -36,7 +36,7 @@ def test_bind_small(db):
     params = tuple(params)
 
     with measure(db, 'bind (small)'):
-        for i in range(60000):
+        for i in range(50000):
             db.execute(sql, params)
 
 def test_column(db):
@@ -48,7 +48,7 @@ def test_column(db):
     db.execute('insert into k values (%s)' % binds, values)
 
     with measure(db, 'column'):
-        for i in range(20000):
+        for i in range(10000):
             db.execute('select * from k').fetchone()
 
     db.execute('drop table k')
