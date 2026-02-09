@@ -12,6 +12,16 @@ closer in spirit to ``apsw``, just with fewer features.
 
 cysqlite supports standalone builds or dynamic-linking with the system SQLite.
 
+``cysqlite`` is a Cython-based SQLite driver that provides:
+
+* DB-API 2.0 compatible (mostly)
+* Performant query execution
+* Transaction management with context-managers and decorators
+* User-defined functions, aggregates, window functions, and virtual tables
+* BLOB support
+* Row objects with dict-like access
+* Schema introspection utilities
+
 .. note::
    If you are looking for a SQLite driver that "just works" wherever your
    application will be used or installed (e.g. you are a library developer),

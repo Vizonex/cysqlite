@@ -105,6 +105,23 @@ Connection
    is set **or** ``'://'`` occurs in the database name, ``SQLITE_OPEN_URI``
    will be included.
 
+   Examples:
+
+   .. code-block:: python
+
+      # Simple connection
+      conn = cysqlite.Connection('app.db')
+
+      # In-memory database
+      conn = cysqlite.Connection(':memory:')
+
+      # Read-only connection
+      conn = cysqlite.Connection('data.db',
+                                 flags=cysqlite.C_SQLITE_OPEN_READONLY)
+
+      # Custom row factory
+      conn = cysqlite.Connection('app.db', row_factory=cysqlite.Row)
+
    .. attribute:: row_factory
 
       Factory for creating row instances from query results, e.g. :class:`Row`.
@@ -1220,6 +1237,16 @@ Cursor
 
       Factory for creating row instances from query results, e.g. :class:`Row`.
       Uses the value from the :attr:`Connection.row_factory` by default.
+
+      Example:
+
+      .. code-block:: python
+
+         cursor = db.cursor()
+         cursor.row_factory = cysqlite.Row
+         cursor.execute('SELECT * FROM users')
+         for row in cursor:
+             print(row['name'])  # Access by column name
 
    .. method:: execute(sql, params=None)
 
