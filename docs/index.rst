@@ -16,7 +16,7 @@ cysqlite supports standalone builds or dynamic-linking with the system SQLite.
 
 ``cysqlite`` is a Cython-based SQLite driver that provides:
 
-* DB-API 2.0 compatible (mostly)
+* DB-API 2.0 compatible
 * Performant query execution
 * Transaction management with context-managers and decorators
 * User-defined functions, aggregates, window functions, and virtual tables

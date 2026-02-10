@@ -49,7 +49,7 @@ jobs:
 
       - name: Download sqlite sources
         run: |
-          python scripts/fetch_source.py
+          python scripts/fetch_sqlite
 
       - name: Build wheels
         run: |

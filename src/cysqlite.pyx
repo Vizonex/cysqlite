@@ -47,7 +47,7 @@ from src.cysqlite cimport *
 include "./sqlite3.pxi"
 
 
-version = '0.1.3'
+version = '0.1.4'
 version_info = tuple(int(i) for i in version.split('.'))
 
 # DB-API 2.0 module attributes.
