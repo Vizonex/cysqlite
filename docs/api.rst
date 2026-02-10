@@ -231,6 +231,35 @@ Connection
          print(curs.lastrowid)  # 5.
          print(curs.rowcount)  # 2.
 
+   .. method:: executescript(sql)
+
+      Execute the SQL statement(s) in *sql*.
+
+      :param str sql: One or more SQL statements to execute in a script.
+      :return: cursor object.
+      :rtype: :class:`Cursor`
+
+      Example:
+
+      .. code-block:: python
+
+         db.executescript("""
+             begin;
+             create table users (
+                id integer not null primary key,
+                name text not null,
+                email text not null);
+             create indexusers_email ON users (email);
+
+             create table tweets (
+                id integer not null primary key,
+                content text not null,
+                user_id integer not null references users (id),
+                timestamp integer not null);
+
+             commit;
+         """)
+
    .. method:: execute_one(sql, params=None)
 
       Create a new :class:`Cursor` and call :meth:`~Cursor.execute` with the
@@ -1313,6 +1342,36 @@ Cursor
                           [{'k': 'k4', 'v': 'v4'}, {'k': 'k5', 'v': 'v5'}])
          print(curs.lastrowid)  # 5.
          print(curs.rowcount)  # 2.
+
+   .. method:: executescript(sql)
+
+      Execute the SQL statement(s) in *sql*.
+
+      :param str sql: One or more SQL statements to execute in a script.
+      :return: self
+      :rtype: :class:`Cursor`
+
+      Example:
+
+      .. code-block:: python
+
+         curs = db.cursor()
+         curs.executescript("""
+             begin;
+             create table users (
+                id integer not null primary key,
+                name text not null,
+                email text not null);
+             create indexusers_email ON users (email);
+
+             create table tweets (
+                id integer not null primary key,
+                content text not null,
+                user_id integer not null references users (id),
+                timestamp integer not null);
+
+             commit;
+         """)
 
    .. method:: __iter__()
                __next__()

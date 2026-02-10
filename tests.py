@@ -359,6 +359,29 @@ class TestExecute(BaseTestCase):
         # Ensure cursor is usable.
         self.assertEqual(cursor.execute('select 1').value(), 1)
 
+    def test_execute_invalid_sql(self):
+        with self.assertRaises(OperationalError):
+            self.db.execute('select * from not_exists')
+
+        with self.assertRaises(OperationalError):
+            self.db.executemany('insert into not_exists (?)',
+                                [(1,), (2,)])
+
+        with self.assertRaises(OperationalError):
+            self.db.executescript("""
+                BEGIN;
+                CREATE TABLE t1 (id integer primary key, c1 text);
+                SELECT * FROM not_exist;
+                COMMIT;
+            """)
+
+            # Error occurred while txn is active, tx still active.
+            self.assertEqual(sorted(self.db.get_tables()), ['t1'])
+
+        self.assertTrue(self.db.in_transaction)
+        self.db.rollback()
+        self.assertEqual(sorted(self.db.get_tables()), [])
+
     def test_execute_wrong_params(self):
         self.db.execute('create table g (k, v)')
         q = 'insert into g (k, v) values (?, ?)'
