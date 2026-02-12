@@ -48,6 +48,7 @@ if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
     if os.environ.get('SQLCIPHER'):
         define_macros.extend([
             ('SQLITE_HAS_CODEC', '1'),
+            ('SQLITE_SECURE_DELETE', '1'),
             ('SQLITE_TEMP_STORE', '2'),
             ('SQLITE_THREADSAFE', '1'),
             ('SQLITE_EXTRA_INIT', 'sqlcipher_extra_init'),
@@ -60,6 +61,12 @@ if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
                 'USER32.LIB', 'libcrypto.lib'])
         else:
             link_args.extend(['-lcrypto'])
+    elif os.environ.get('SQLITEMC'):
+        define_macros.extend([
+            ('SQLITE_SECURE_DELETE', '1'),
+            ('SQLITE_TEMP_STORE', '2'),
+            ('SQLITE_THREADSAFE', '1'),
+        ])
     else:
         define_macros.extend([
             ('SQLITE_TEMP_STORE', 3),

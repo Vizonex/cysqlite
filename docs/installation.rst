@@ -86,7 +86,7 @@ the root of your checkout:
     ./scripts/fetch_sqlcipher  # Will add sqlite3.c and sqlite3.h in checkout.
 
     # Build self-contained cysqlite with SQLCipher embedded.
-    pip install .
+    SQLCIPHER=1 pip install .
 
 Building the SQLCipher amalgamation yourself:
 
@@ -131,4 +131,4 @@ Building the SQLCipher amalgamation yourself:
 
     # Build self-contained cysqlite with SQLCipher.
     cd /path/to/cysqlite/
-    pip install .
+    SQLCIPHER=1 pip install .
