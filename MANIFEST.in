@@ -4,6 +4,8 @@ include LICENSE
 include pyproject.toml
 include setup.py
 include tests.py
+include sqlite3*.c
+include sqlite3*.h
 recursive-include src *
 
 global-exclude *.o

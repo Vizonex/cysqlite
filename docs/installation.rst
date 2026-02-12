@@ -132,3 +132,15 @@ Building the SQLCipher amalgamation yourself:
     # Build self-contained cysqlite with SQLCipher.
     cd /path/to/cysqlite/
     SQLCIPHER=1 pip install .
+
+SQLite Multiple Ciphers
+-----------------------
+
+cysqlite can be built with encryption support provided by `SQLite3 Multiple Ciphers <https://utelle.github.io/SQLite3MultipleCiphers/>`_.
+To build a self-contained cysqlite with sqlite3mc:
+
+1. Open the `releases page <https://github.com/utelle/SQLite3MultipleCiphers/releases>`_
+   and download the latest amalgamation zip file.
+2. Extract ``sqlite3mc_amalgamation.c`` and ``sqlite3mc_amalgamation.h`` into
+   the root of your cysqlite checkout, alongside ``setup.py``.
+3. Run ``pip install .``

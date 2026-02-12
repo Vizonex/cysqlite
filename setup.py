@@ -22,8 +22,19 @@ if os.environ.get('DEBUG') and sys.platform != 'win32':
 
 link_args = []
 
+# Determine how we are building cysqlite.
+sqlite_source = None
+is_sqlite_mc = False
+
 if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
-    sources.append('sqlite3.c')
+    sqlite_source = 'sqlite3.c'
+elif os.path.exists('sqlite3mc_amalgamation.c') and \
+     os.path.exists('sqlite3mc_amalgamation.h'):
+    sqlite_source = 'sqlite3mc_amalgamation.c'
+    is_sqlite_mc = True
+
+if sqlite_source:
+    sources.append(sqlite_source)
     include_dirs = ['.']
     libraries = []
     define_macros = [
@@ -61,7 +72,7 @@ if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
                 'USER32.LIB', 'libcrypto.lib'])
         else:
             link_args.extend(['-lcrypto'])
-    elif os.environ.get('SQLITEMC'):
+    elif os.environ.get('SQLITEMC') or is_sqlite_mc:
         define_macros.extend([
             ('SQLITE_SECURE_DELETE', '1'),
             ('SQLITE_TEMP_STORE', '2'),
