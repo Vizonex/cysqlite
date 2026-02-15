@@ -10,6 +10,8 @@ from decimal import Decimal
 from fractions import Fraction
 
 from cysqlite import *
+from cysqlite._cysqlite import Cursor
+from cysqlite.metadata import Column, ForeignKey, Index
 
 
 SLOW_TESTS = os.environ.get('SLOW_TESTS')
@@ -102,8 +104,8 @@ class TestModule(unittest.TestCase):
         self.assertTrue(isinstance(cysqlite.version_info, tuple))
         self.assertTrue(isinstance(cysqlite.sqlite_version, str))
         self.assertTrue(isinstance(cysqlite.sqlite_version_info, tuple))
-        self.assertEqual(cysqlite.C_SQLITE_OK, 0)
-        self.assertEqual(cysqlite.C_SQLITE_ERROR, 1)
+        self.assertEqual(cysqlite.SQLITE_OK, 0)
+        self.assertEqual(cysqlite.SQLITE_ERROR, 1)
 
 
 class TestOpenConnection(unittest.TestCase):
@@ -143,12 +145,12 @@ class TestOpenConnection(unittest.TestCase):
 
     def test_limit(self):
         db = Connection(':memory:')
-        limit = db.getlimit(C_SQLITE_LIMIT_LENGTH)
+        limit = db.getlimit(SQLITE_LIMIT_LENGTH)
         self.assertTrue(limit > 0)
 
-        db.setlimit(C_SQLITE_LIMIT_LENGTH, limit - 1)
+        db.setlimit(SQLITE_LIMIT_LENGTH, limit - 1)
 
-        limit2 = db.getlimit(C_SQLITE_LIMIT_LENGTH)
+        limit2 = db.getlimit(SQLITE_LIMIT_LENGTH)
         self.assertEqual(limit2, limit - 1)
 
 
@@ -1367,14 +1369,14 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.assertCount(4)  # Everything went through.
 
     def test_authorizer(self):
-        ret = [AUTH_OK]
+        ret = [SQLITE_OK]
         state = []
         def authorizer(op, p1, p2, p3, p4):
             state.append((op, p1, p2, p3, p4))
             if op == 21:  # SQLITE_SELECT.
-                return AUTH_OK
+                return SQLITE_OK
             if op == 20 and p2 != 'key':  # SQLITE_READ.
-                return AUTH_OK
+                return SQLITE_OK
             return ret[0]
         self.db.authorizer(authorizer)
 
@@ -1383,13 +1385,13 @@ class TestUserDefinedCallbacks(BaseTestCase):
             (9, 'kv', None, 'main', None),
             (20, 'kv', 'key', 'main', None)])
 
-        ret = [AUTH_IGNORE]
+        ret = [SQLITE_IGNORE]
         curs = self.db.execute('select key, value, extra from kv order by id')
         self.assertEqual(list(curs), [
             (None, 'v2b', 20),
             (None, 'v3z', 30)])
 
-        ret = [AUTH_DENY]
+        ret = [SQLITE_DENY]
         with self.assertRaises(OperationalError):
             self.db.execute('select * from kv')
 
@@ -1423,7 +1425,7 @@ class TestUserDefinedCallbacks(BaseTestCase):
         def tracer(code, sid, sql, ns):
             accum.append((code, sql))
 
-        self.db.trace(tracer, TRACE_ROW | TRACE_STMT)
+        self.db.trace(tracer, SQLITE_TRACE_ROW | SQLITE_TRACE_STMT)
         curs = self.db.execute('select key from kv order by key')
         self.assertEqual([k for k, in curs], ['k1', 'k2', 'k3'])
 
@@ -1434,7 +1436,7 @@ class TestUserDefinedCallbacks(BaseTestCase):
     def test_broken_tracer(self):
         def broken(code, sid, sql, ns):
             raise ValueError('trace fail')
-        self.db.trace(broken, TRACE_ROW | TRACE_STMT)
+        self.db.trace(broken, SQLITE_TRACE_ROW | SQLITE_TRACE_STMT)
         self.assertCount(3)
         self.assertTrue(isinstance(self.db.callback_error, ValueError))
         self.assertEqual(self.db.callback_error.args[0], 'trace fail')

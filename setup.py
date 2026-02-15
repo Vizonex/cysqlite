@@ -97,4 +97,10 @@ cysqlite_extension = Extension(
     extra_compile_args=compile_args,
     extra_link_args=link_args)
 
-setup(ext_modules=cythonize([cysqlite_extension]))
+constants_extension = Extension(
+    'cysqlite._constants',
+    include_dirs=include_dirs,
+    libraries=libraries,
+    sources=['src/cysqlite/_constants.c'])
+
+setup(ext_modules=cythonize([cysqlite_extension]) + [constants_extension])

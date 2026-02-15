@@ -117,7 +117,7 @@ Connection
 
       # Read-only connection
       conn = cysqlite.Connection('data.db',
-                                 flags=cysqlite.C_SQLITE_OPEN_READONLY)
+                                 flags=cysqlite.SQLITE_OPEN_READONLY)
 
       # Custom row factory
       conn = cysqlite.Connection('app.db', row_factory=cysqlite.Row)
@@ -523,7 +523,7 @@ Connection
          db.execute('select * from register').fetchall()
 
          # Get the page cache used.
-         print(db.status(C_SQLITE_STATUS_PAGECACHE_USED))
+         print(db.status(SQLITE_STATUS_PAGECACHE_USED))
          # (123456, 0)
 
    .. method:: pragma(key, value=SENTINEL, database=None, multi=False)
@@ -1055,15 +1055,15 @@ Connection
       :param fn: callable or ``None`` to clear the current authorizer.
       :type fn: callable | None
       :return:
-          one of :data:`C_SQLITE_OK`, :data:`C_SQLITE_IGNORE` or :data:`C_SQLITE_DENY`.
+          one of :data:`SQLITE_OK`, :data:`SQLITE_IGNORE` or :data:`SQLITE_DENY`.
 
           .. seealso:: :ref:`authorizer-flags`
 
       Register an authorizer callback. Authorizer callbacks must accept 5
       parameters, which vary depending on the operation being checked.
 
-      * op: operation code, e.g. :data:`C_SQLITE_INSERT`.
-      * p1: operation-specific value, e.g. table name for :data:`C_SQLITE_INSERT`.
+      * op: operation code, e.g. :data:`SQLITE_INSERT`.
+      * p1: operation-specific value, e.g. table name for :data:`SQLITE_INSERT`.
       * p2: operation-specific value.
       * p3: database name, e.g. ``"main"``.
       * p4: inner-most trigger or view responsible for the access attempt if
@@ -1074,10 +1074,10 @@ Connection
 
       The authorizer callback must return one of:
 
-      * :data:`C_SQLITE_OK`: allow operation.
-      * :data:`C_SQLITE_IGNORE`: allow statement compilation but prevent
+      * :data:`SQLITE_OK`: allow operation.
+      * :data:`SQLITE_IGNORE`: allow statement compilation but prevent
         the operation from occuring.
-      * :data:`C_SQLITE_DENY`: prevent statement compilation.
+      * :data:`SQLITE_DENY`: prevent statement compilation.
 
       Only a single authorizer can be in place on a database connection at a time.
 
@@ -1087,9 +1087,9 @@ Connection
 
          # Prevent any updates to the log table.
          def prevent_updating_log(op, p1, p2, p3, p4):
-             if op == C_SQLITE_UPDATE and p1 == 'log':
-                 return C_SQLITE_DENY
-             return C_SQLITE_OK
+             if op == SQLITE_UPDATE and p1 == 'log':
+                 return SQLITE_DENY
+             return SQLITE_OK
 
          db.authorizer(prevent_updating_log)
 
@@ -1102,14 +1102,22 @@ Connection
       :param int mask: mask of what types of events to trace. Default value
           corresponds to ``SQLITE_TRACE_PROFILE``.
 
+      Mask must consist of one or more of the following constants combined with
+      bitwise-or:
+
+      * :data:`SQLITE_TRACE_STMT`
+      * :data:`SQLITE_TRACE_PROFILE`
+      * :data:`SQLITE_TRACE_ROW`
+      * :data:`SQLITE_TRACE_CLOSE`
+
       Register a trace hook. Trace callback must accept 4 parameters, which
       vary depending on the operation being traced:
 
-      * event: type of event, e.g. ``cysqlite.TRACE_PROFILE``.
-      * sid: memory address of statement (only ``cysqlite.TRACE_CLOSE``), else -1.
-      * sql: SQL string (only ``cysqlite.TRACE_STMT``), else None.
+      * event: type of event, e.g. ``SQLITE_TRACE_PROFILE``.
+      * sid: memory address of statement (only ``SQLITE_TRACE_CLOSE``), else -1.
+      * sql: SQL string (only ``SQLITE_TRACE_STMT``), else None.
       * ns: estimated number of nanoseconds the statement took to run (only
-        ``cysqlite.TRACE_PROFILE``), else -1.
+        ``SQLITE_TRACE_PROFILE``), else -1.
 
       See `sqlite_trace_v2 <https://sqlite.org/c3ref/c_trace.html>`_ for
       more details on trace modes and parameters.
@@ -1135,7 +1143,7 @@ Connection
          def allow_interrupt():
              if halt_requested:
                  return 1  # Triggers an interrupt.
-             return C_SQLITE_OK
+             return SQLITE_OK
 
          # Install our progress handler.
          db.progress(allow_interrupt)
@@ -2091,7 +2099,7 @@ exception hierarchy.
 Constants
 ---------
 
-.. attribute:: C_SQLITE_OK
+.. attribute:: SQLITE_OK
     :type: int
     :value: 0
 
@@ -2100,32 +2108,32 @@ Constants
 Error codes
 ^^^^^^^^^^^
 
-.. data:: C_SQLITE_ERROR
-             C_SQLITE_INTERNAL
-             C_SQLITE_PERM
-             C_SQLITE_ABORT
-             C_SQLITE_BUSY
-             C_SQLITE_LOCKED
-             C_SQLITE_NOMEM
-             C_SQLITE_READONLY
-             C_SQLITE_INTERRUPT
-             C_SQLITE_IOERR
-             C_SQLITE_CORRUPT
-             C_SQLITE_NOTFOUND
-             C_SQLITE_FULL
-             C_SQLITE_CANTOPEN
-             C_SQLITE_PROTOCOL
-             C_SQLITE_EMPTY
-             C_SQLITE_SCHEMA
-             C_SQLITE_TOOBIG
-             C_SQLITE_CONSTRAINT
-             C_SQLITE_MISMATCH
-             C_SQLITE_MISUSE
-             C_SQLITE_NOLFS
-             C_SQLITE_AUTH
-             C_SQLITE_FORMAT
-             C_SQLITE_RANGE
-             C_SQLITE_NOTADB
+.. data:: SQLITE_ERROR
+          SQLITE_INTERNAL
+          SQLITE_PERM
+          SQLITE_ABORT
+          SQLITE_BUSY
+          SQLITE_LOCKED
+          SQLITE_NOMEM
+          SQLITE_READONLY
+          SQLITE_INTERRUPT
+          SQLITE_IOERR
+          SQLITE_CORRUPT
+          SQLITE_NOTFOUND
+          SQLITE_FULL
+          SQLITE_CANTOPEN
+          SQLITE_PROTOCOL
+          SQLITE_EMPTY
+          SQLITE_SCHEMA
+          SQLITE_TOOBIG
+          SQLITE_CONSTRAINT
+          SQLITE_MISMATCH
+          SQLITE_MISUSE
+          SQLITE_NOLFS
+          SQLITE_AUTH
+          SQLITE_FORMAT
+          SQLITE_RANGE
+          SQLITE_NOTADB
 
 .. _sqlite-status-flags:
 
@@ -2136,32 +2144,32 @@ Sqlite Status Flags
    :func:`status`
       Read SQLite status, uses ``sqlite3_status`` internally.
 
-.. data:: C_SQLITE_STATUS_MEMORY_USED
-          C_SQLITE_STATUS_PAGECACHE_USED
-          C_SQLITE_STATUS_PAGECACHE_OVERFLOW
-          C_SQLITE_STATUS_SCRATCH_USED
-          C_SQLITE_STATUS_SCRATCH_OVERFLOW
-          C_SQLITE_STATUS_MALLOC_SIZE
-          C_SQLITE_STATUS_PARSER_STACK
-          C_SQLITE_STATUS_PAGECACHE_SIZE
-          C_SQLITE_STATUS_SCRATCH_SIZE
-          C_SQLITE_STATUS_MALLOC_COUNT
+.. data:: SQLITE_STATUS_MEMORY_USED
+          SQLITE_STATUS_PAGECACHE_USED
+          SQLITE_STATUS_PAGECACHE_OVERFLOW
+          SQLITE_STATUS_SCRATCH_USED
+          SQLITE_STATUS_SCRATCH_OVERFLOW
+          SQLITE_STATUS_MALLOC_SIZE
+          SQLITE_STATUS_PARSER_STACK
+          SQLITE_STATUS_PAGECACHE_SIZE
+          SQLITE_STATUS_SCRATCH_SIZE
+          SQLITE_STATUS_MALLOC_COUNT
 
 .. seealso::
    :meth:`Connection.status`
       Read SQLite database status, uses ``sqlite3_db_status`` internally.
 
-.. data:: C_SQLITE_DBSTATUS_LOOKASIDE_USED
-          C_SQLITE_DBSTATUS_CACHE_USED
-          C_SQLITE_DBSTATUS_SCHEMA_USED
-          C_SQLITE_DBSTATUS_STMT_USED
-          C_SQLITE_DBSTATUS_LOOKASIDE_HIT
-          C_SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE
-          C_SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL
-          C_SQLITE_DBSTATUS_CACHE_HIT
-          C_SQLITE_DBSTATUS_CACHE_MISS
-          C_SQLITE_DBSTATUS_CACHE_WRITE
-          C_SQLITE_DBSTATUS_DEFERRED_FKS
+.. data:: SQLITE_DBSTATUS_LOOKASIDE_USED
+          SQLITE_DBSTATUS_CACHE_USED
+          SQLITE_DBSTATUS_SCHEMA_USED
+          SQLITE_DBSTATUS_STMT_USED
+          SQLITE_DBSTATUS_LOOKASIDE_HIT
+          SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE
+          SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL
+          SQLITE_DBSTATUS_CACHE_HIT
+          SQLITE_DBSTATUS_CACHE_MISS
+          SQLITE_DBSTATUS_CACHE_WRITE
+          SQLITE_DBSTATUS_DEFERRED_FKS
 
 .. _sqlite-connection-flags:
 
@@ -2172,32 +2180,32 @@ Sqlite Connection Flags
    :class:`Connection` and :func:`connect`
       Flags for controlling how connection is opened.
 
-.. data:: C_SQLITE_OPEN_READONLY
-          C_SQLITE_OPEN_READWRITE
-          C_SQLITE_OPEN_CREATE
-          C_SQLITE_OPEN_URI
-          C_SQLITE_OPEN_MEMORY
-          C_SQLITE_OPEN_NOMUTEX
-          C_SQLITE_OPEN_FULLMUTEX
-          C_SQLITE_OPEN_SHAREDCACHE
-          C_SQLITE_OPEN_PRIVATECACHE
+.. data:: SQLITE_OPEN_READONLY
+          SQLITE_OPEN_READWRITE
+          SQLITE_OPEN_CREATE
+          SQLITE_OPEN_URI
+          SQLITE_OPEN_MEMORY
+          SQLITE_OPEN_NOMUTEX
+          SQLITE_OPEN_FULLMUTEX
+          SQLITE_OPEN_SHAREDCACHE
+          SQLITE_OPEN_PRIVATECACHE
 
 VFS-only Connection Flags
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Support for these flags is dependent on the VFS providing an implementation.
 
-.. data:: C_SQLITE_OPEN_DELETEONCLOSE
-          C_SQLITE_OPEN_EXCLUSIVE
-          C_SQLITE_OPEN_AUTOPROXY
-          C_SQLITE_OPEN_WAL
-          C_SQLITE_OPEN_MAIN_DB
-          C_SQLITE_OPEN_TEMP_DB
-          C_SQLITE_OPEN_TRANSIENT_DB
-          C_SQLITE_OPEN_MAIN_JOURNAL
-          C_SQLITE_OPEN_TEMP_JOURNAL
-          C_SQLITE_OPEN_SUBJOURNAL
-          C_SQLITE_OPEN_MASTER_JOURNAL
+.. data:: SQLITE_OPEN_DELETEONCLOSE
+          SQLITE_OPEN_EXCLUSIVE
+          SQLITE_OPEN_AUTOPROXY
+          SQLITE_OPEN_WAL
+          SQLITE_OPEN_MAIN_DB
+          SQLITE_OPEN_TEMP_DB
+          SQLITE_OPEN_TRANSIENT_DB
+          SQLITE_OPEN_MAIN_JOURNAL
+          SQLITE_OPEN_TEMP_JOURNAL
+          SQLITE_OPEN_SUBJOURNAL
+          SQLITE_OPEN_MASTER_JOURNAL
 
 .. _authorizer-flags:
 
@@ -2208,47 +2216,61 @@ Authorizer Constants
    Setting an authorizer callback.
       :meth:`Connection.authorizer`
 
-Return values (along with :data:`C_SQLITE_OK`) for authorizer callback.
+Return values (along with :data:`SQLITE_OK`) for authorizer callback.
 
-.. data:: C_SQLITE_DENY
-          C_SQLITE_IGNORE
+.. data:: SQLITE_DENY
+          SQLITE_IGNORE
 
 Operations reported to authorizer callback.
 
-.. data:: C_SQLITE_CREATE_INDEX
-          C_SQLITE_CREATE_TABLE
-          C_SQLITE_CREATE_TEMP_INDEX
-          C_SQLITE_CREATE_TEMP_TABLE
-          C_SQLITE_CREATE_TEMP_TRIGGER
-          C_SQLITE_CREATE_TEMP_VIEW
-          C_SQLITE_CREATE_TRIGGER
-          C_SQLITE_CREATE_VIEW
-          C_SQLITE_DELETE
-          C_SQLITE_DROP_INDEX
-          C_SQLITE_DROP_TABLE
-          C_SQLITE_DROP_TEMP_INDEX
-          C_SQLITE_DROP_TEMP_TABLE
-          C_SQLITE_DROP_TEMP_TRIGGER
-          C_SQLITE_DROP_TEMP_VIEW
-          C_SQLITE_DROP_TRIGGER
-          C_SQLITE_DROP_VIEW
-          C_SQLITE_INSERT
-          C_SQLITE_PRAGMA
-          C_SQLITE_READ
-          C_SQLITE_SELECT
-          C_SQLITE_TRANSACTION
-          C_SQLITE_UPDATE
-          C_SQLITE_ATTACH
-          C_SQLITE_DETACH
-          C_SQLITE_ALTER_TABLE
-          C_SQLITE_REINDEX
-          C_SQLITE_ANALYZE
-          C_SQLITE_CREATE_VTABLE
-          C_SQLITE_DROP_VTABLE
-          C_SQLITE_FUNCTION
-          C_SQLITE_SAVEPOINT
-          C_SQLITE_COPY
-          C_SQLITE_RECURSIVE
+.. data:: SQLITE_CREATE_INDEX
+          SQLITE_CREATE_TABLE
+          SQLITE_CREATE_TEMP_INDEX
+          SQLITE_CREATE_TEMP_TABLE
+          SQLITE_CREATE_TEMP_TRIGGER
+          SQLITE_CREATE_TEMP_VIEW
+          SQLITE_CREATE_TRIGGER
+          SQLITE_CREATE_VIEW
+          SQLITE_DELETE
+          SQLITE_DROP_INDEX
+          SQLITE_DROP_TABLE
+          SQLITE_DROP_TEMP_INDEX
+          SQLITE_DROP_TEMP_TABLE
+          SQLITE_DROP_TEMP_TRIGGER
+          SQLITE_DROP_TEMP_VIEW
+          SQLITE_DROP_TRIGGER
+          SQLITE_DROP_VIEW
+          SQLITE_INSERT
+          SQLITE_PRAGMA
+          SQLITE_READ
+          SQLITE_SELECT
+          SQLITE_TRANSACTION
+          SQLITE_UPDATE
+          SQLITE_ATTACH
+          SQLITE_DETACH
+          SQLITE_ALTER_TABLE
+          SQLITE_REINDEX
+          SQLITE_ANALYZE
+          SQLITE_CREATE_VTABLE
+          SQLITE_DROP_VTABLE
+          SQLITE_FUNCTION
+          SQLITE_SAVEPOINT
+          SQLITE_COPY
+          SQLITE_RECURSIVE
+
+.. _trace-flags:
+
+Trace Constants
+^^^^^^^^^^^^^^^
+
+.. seealso::
+   Setting a trace callback.
+      :meth:`Connection.trace`
+
+.. data:: SQLITE_TRACE_STMT
+          SQLITE_TRACE_PROFILE
+          SQLITE_TRACE_ROW
+          SQLITE_TRACE_CLOSE
 
 .. _limit-constants:
 
@@ -2259,15 +2281,15 @@ Limit Constants
    Setting and getting limits.
       :meth:`Connection.setlimit` :meth:`Connection.getlimit`
 
-.. data:: C_SQLITE_LIMIT_LENGTH
-          C_SQLITE_LIMIT_SQL_LENGTH
-          C_SQLITE_LIMIT_COLUMN
-          C_SQLITE_LIMIT_EXPR_DEPTH
-          C_SQLITE_LIMIT_COMPOUND_SELECT
-          C_SQLITE_LIMIT_VDBE_OP
-          C_SQLITE_LIMIT_FUNCTION_ARG
-          C_SQLITE_LIMIT_ATTACHED
-          C_SQLITE_LIMIT_LIKE_PATTERN_LENGTH
-          C_SQLITE_LIMIT_VARIABLE_NUMBER
-          C_SQLITE_LIMIT_TRIGGER_DEPTH
-          C_SQLITE_LIMIT_WORKER_THREADS
+.. data:: SQLITE_LIMIT_LENGTH
+          SQLITE_LIMIT_SQL_LENGTH
+          SQLITE_LIMIT_COLUMN
+          SQLITE_LIMIT_EXPR_DEPTH
+          SQLITE_LIMIT_COMPOUND_SELECT
+          SQLITE_LIMIT_VDBE_OP
+          SQLITE_LIMIT_FUNCTION_ARG
+          SQLITE_LIMIT_ATTACHED
+          SQLITE_LIMIT_LIKE_PATTERN_LENGTH
+          SQLITE_LIMIT_VARIABLE_NUMBER
+          SQLITE_LIMIT_TRIGGER_DEPTH
+          SQLITE_LIMIT_WORKER_THREADS
