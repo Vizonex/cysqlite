@@ -500,8 +500,8 @@ class TestExecute(BaseTestCase):
         self.assertEqual(res, (1,))
 
     def test_empty_query(self):
-        self.assertRaises(SqliteError, self.db.execute, '')
-        self.assertRaises(SqliteError, self.db.execute, '    ')
+        self.assertRaises(OperationalError, self.db.execute, '')
+        self.assertRaises(OperationalError, self.db.execute, '    ')
 
     def test_very_long_query(self):
         columns = ', '.join(['%d as col%d' % (i, i) for i in range(1000)])

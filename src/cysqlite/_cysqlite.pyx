@@ -35,7 +35,6 @@ from libc.stdlib cimport rand
 from libc.string cimport memcpy
 from libc.string cimport memset
 
-
 from collections import namedtuple
 from random import randint
 import datetime
@@ -43,17 +42,21 @@ import traceback
 import uuid
 import weakref
 
-from src.cysqlite cimport *
+from cysqlite._cysqlite cimport *
+from cysqlite.exceptions import (
+    OperationalError,
+    IntegrityError,
+    InternalError,
+    ProgrammingError)
+from cysqlite.metadata import (
+    ColumnMetadata,
+    Column,
+    ForeignKey,
+    Index,
+    View)
 
 include "./sqlite3.pxi"
 
-
-version = '0.1.4'
-version_info = tuple(int(i) for i in version.split('.'))
-
-# DB-API 2.0 module attributes.
-apilevel = '2.0'
-paramstyle = 'qmark'
 
 cdef int _determine_threadsafety():
     cdef int mode = sqlite3_threadsafe()
@@ -64,20 +67,6 @@ cdef int _determine_threadsafety():
     return 1
 
 threadsafety = _determine_threadsafety()
-
-class SqliteError(Exception): pass
-class Error(SqliteError): pass
-class Warning(SqliteError): pass
-
-class InterfaceError(Error): pass
-class DatabaseError(Error): pass
-
-class DataError(DatabaseError): pass
-class OperationalError(DatabaseError): pass
-class IntegrityError(DatabaseError): pass
-class InternalError(DatabaseError): pass
-class ProgrammingError(DatabaseError): pass
-class NotSupportedError(DatabaseError): pass
 
 
 # Forward references.
@@ -90,15 +79,6 @@ cdef class Savepoint(object)
 cdef class Blob(object)
 
 
-ColumnMetadata = namedtuple('ColumnMetadata', (
-    'table', 'column', 'datatype', 'collation', 'not_null', 'primary_key',
-    'auto_increment'))
-Index = namedtuple('Index', ('name', 'sql', 'columns', 'unique', 'table'))
-Column = namedtuple('Column', ('name', 'data_type', 'null', 'primary_key',
-                               'table', 'default'))
-ForeignKey = namedtuple('ForeignKey', ('column', 'dest_table', 'dest_column',
-                                       'table'))
-View = namedtuple('View', ('name', 'sql'))
 SENTINEL = object()
 
 

@@ -11,9 +11,9 @@ except ImportError:
     cython_installed = False
 
 if cython_installed:
-    sources = ['src/cysqlite.pyx']
+    sources = ['src/cysqlite/_cysqlite.pyx']
 else:
-    sources = ['src/cysqlite.c']
+    sources = ['src/cysqlite/_cysqlite.c']
     cythonize = lambda obj: obj
 
 compile_args = ['-O3', '-Wall'] if sys.platform != 'win32' else ['/O2']
@@ -89,7 +89,7 @@ else:
     define_macros = []
 
 cysqlite_extension = Extension(
-    'cysqlite',
+    'cysqlite._cysqlite',
     sources=sources,
     include_dirs=include_dirs,
     libraries=libraries,
