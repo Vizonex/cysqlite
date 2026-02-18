@@ -148,19 +148,22 @@ Connection
       :param str data_type: declared SQLite data-type to apply conversion to.
       :param fn: ``callable`` that accepts a single value and converts it.
 
+      .. seealso:: :meth:`Connection.converter` decorator.
+
       Example:
 
       .. code-block:: python
 
          db = cysqlite.connect(':memory:')
 
+         # Automatically parse and load data declared as JSON.
+         db.register_converter('json', json.loads)
+
+         # Or use the `converter()` decorator.
          @db.converter('datetime')
          def convert_datetime(value):
              # Converts our ISO-formatted date string into a python datetime.
              return datetime.datetime.fromisoformat(value)
-
-         # Automatically parse and load data declared as JSON.
-         db.register_converter('json', json.loads)
 
          # Handle decimal data.
          @db.converter('numeric')
