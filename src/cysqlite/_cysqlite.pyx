@@ -307,13 +307,12 @@ cdef class Statement(object):
         pc = sqlite3_bind_parameter_count(self.st)
 
         # If params were passed as a dict, convert to a list.
-        if PyDict_Check(params):
-            params = self._convert_dict_to_params(params, pc)
-
-        if not PyTuple_Check(params):
-            tparams = tuple(params)
-        else:
+        if PyTuple_Check(params):
             tparams = <tuple>params
+        elif PyDict_Check(params):
+            tparams = self._convert_dict_to_params(params, pc)
+        else:
+            tparams = tuple(params)
 
         if pc != PyTuple_GET_SIZE(tparams):
             raise OperationalError('error: %s parameters required' % pc)
@@ -326,8 +325,6 @@ cdef class Statement(object):
                 rc = sqlite3_bind_null(self.st, i + 1)
             elif isinstance(param, int):
                 rc = sqlite3_bind_int64(self.st, i + 1, param)
-            elif isinstance(param, float):
-                rc = sqlite3_bind_double(self.st, i + 1, param)
             elif isinstance(param, unicode):
                 buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
                 if buf == NULL:
@@ -336,8 +333,17 @@ cdef class Statement(object):
                                          <sqlite3_uint64>nbytes,
                                          SQLITE_TRANSIENT,
                                          SQLITE_UTF8)
+            elif isinstance(param, float):
+                rc = sqlite3_bind_double(self.st, i + 1, param)
+            elif PyBytes_Check(param):
+                # Faster implementation for bytes vs buffer.
+                buf = PyBytes_AS_STRING(param)
+                rc = sqlite3_bind_blob64(
+                    self.st, i + 1, buf,
+                    <sqlite3_uint64>PyBytes_GET_SIZE(param),
+                    SQLITE_TRANSIENT)
             elif PyObject_CheckBuffer(param):
-                # bytes, bytearray, memoryview.
+                # bytearray, memoryview, (bytes).
                 if PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO):
                     raise TypeError('Object does not support readable buffer.')
                 rc = sqlite3_bind_blob64(self.st, i + 1, view.buf,
@@ -348,9 +354,9 @@ cdef class Statement(object):
                 # Decimal, Fraction, e.g.
                 rc = sqlite3_bind_double(self.st, i + 1, float(param))
             else:
-                if isinstance(param, datetime.datetime):
+                if type(param) is datetime.datetime:
                     param = param.isoformat(' ')
-                elif isinstance(param, datetime.date):
+                elif type(param) is datetime.date:
                     param = param.isoformat()
                 else:
                     param = str(param)
