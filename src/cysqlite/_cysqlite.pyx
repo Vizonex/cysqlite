@@ -387,9 +387,35 @@ cdef class Statement(object):
         self.st = NULL
         return 0
 
-    cdef get_row_data(self):
+    cdef build_row_casts(self):
         cdef:
-            int i, ncols = sqlite3_data_count(self.st)
+            const char *decltype
+            int i, l, ncols = sqlite3_data_count(self.st)
+            list converters = []
+
+        for i in range(ncols):
+            converters.append(None)
+            decltype = sqlite3_column_decltype(self.st, i)
+            if decltype != NULL:
+                l = 0
+                while (decltype[l] != 32 and decltype[l] != 0 and
+                       decltype[l] != 40):
+                    l += 1
+                if l > 0:
+                    name = decode(decltype[:l]).upper()
+                    if name in self.conn.converters:
+                        converters[-1] = self.conn.converters[name]
+                    else:
+                        name = decode(decltype).upper()
+                        if name in self.conn.converters:
+                            converters[-1] = self.conn.converters[name]
+
+        return converters
+
+    cdef get_row_data(self, list converters):
+        cdef:
+            int i
+            int ncols = sqlite3_data_count(self.st)
             tuple result = PyTuple_New(ncols)
             object value
 
@@ -416,6 +442,9 @@ cdef class Statement(object):
                 raise OperationalError(
                     'error: cannot read parameter %d: type = %r'
                     % (i, coltype))
+
+            if converters is not None and converters[i] is not None:
+                value = converters[i](value)
 
             # If we were in C we wouldn't need to do this, but Cython sees that
             # we are losing the reference to the object while looping and
@@ -455,12 +484,14 @@ cdef class Cursor(object):
         Statement stmt
         bint executing
         int step_status
+        list converters
 
     def __cinit__(self, Connection conn):
         self.conn = conn
         self.stmt = None
         self.executing = False
         self.description = None
+        self.converters = None
         self.row_factory = conn.row_factory
 
     def __dealloc__(self):
@@ -482,6 +513,7 @@ cdef class Cursor(object):
             self.finish()
 
         self.description = None
+        self.converters = None
         self.rowcount = -1
         self.lastrowid = None
 
@@ -495,6 +527,8 @@ cdef class Cursor(object):
         if self.step_status == SQLITE_ROW:
             self.executing = True
             self.set_description()
+            if self.conn.converters:
+                self.converters = self.stmt.build_row_casts()
         elif self.step_status == SQLITE_DONE:
             if not self.stmt.is_dml:
                 self.set_description()
@@ -523,6 +557,7 @@ cdef class Cursor(object):
             self.finish()
 
         self.description = None
+        self.converters = None
         self.rowcount = 0
         self.lastrowid = None
         self.executing = True
@@ -616,7 +651,7 @@ cdef class Cursor(object):
         row = None
 
         if self.step_status == SQLITE_ROW:
-            row = self.stmt.get_row_data()
+            row = self.stmt.get_row_data(self.converters)
             self.step_status = self.stmt.step()
         elif self.step_status == SQLITE_DONE:
             self.finish()
@@ -691,7 +726,8 @@ cdef class Connection(_callable_context_manager):
         public object _callback_error
 
         # List of statements, transactions, savepoints, blob handles?
-        dict functions
+        dict converters  # SQLite decltype -> converter(value).
+        dict functions  # name -> fn.
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
         object blob_in_use  # id(blob) -> Blob.
@@ -712,6 +748,7 @@ cdef class Connection(_callable_context_manager):
         self.row_factory = row_factory
         self.print_callback_tracebacks = False
         self._callback_error = None
+        self.converters = {}
 
         self.db = NULL
         self.functions = {}
@@ -1538,7 +1575,7 @@ cdef _AggregateWrapper get_aggregate(sqlite3_context *ctx):
         aggregate_ctx *agg_ctx = <aggregate_ctx *>sqlite3_aggregate_context(ctx, sizeof(aggregate_ctx))
 
     if not agg_ctx:
-        sqlite3_result_error(ctx, b'user-defined aggregate invalid', -1)
+        sqlite3_result_error_nomem(ctx)
         return
 
     if agg_ctx.in_use:
@@ -2031,6 +2068,15 @@ cdef class Blob(object):
     def __len__(self):
         _check_blob_closed(self)
         return sqlite3_blob_bytes(self.blob)
+
+    def readable(self):
+        return True
+
+    def writable(self):
+        return self.flags != 0
+
+    def seekable(self):
+        return True
 
     def read(self, n=None):
         _check_blob_closed(self)
