@@ -387,7 +387,7 @@ cdef class Statement(object):
         self.st = NULL
         return 0
 
-    cdef build_row_casts(self):
+    cdef get_row_converters(self, dict mapping):
         cdef:
             const char *decltype
             int i, l, ncols = sqlite3_data_count(self.st)
@@ -403,16 +403,16 @@ cdef class Statement(object):
                     l += 1
                 if l > 0:
                     name = decode(decltype[:l]).upper()
-                    if name in self.conn.converters:
-                        converters[-1] = self.conn.converters[name]
+                    if name in mapping:
+                        converters[-1] = mapping[name]
                     else:
                         name = decode(decltype).upper()
-                        if name in self.conn.converters:
-                            converters[-1] = self.conn.converters[name]
+                        if name in mapping:
+                            converters[-1] = mapping[name]
 
         return converters
 
-    cdef get_row_data(self, list converters):
+    cdef get_row_data(self, list row_converters):
         cdef:
             int i
             int ncols = sqlite3_data_count(self.st)
@@ -443,8 +443,9 @@ cdef class Statement(object):
                     'error: cannot read parameter %d: type = %r'
                     % (i, coltype))
 
-            if converters is not None and converters[i] is not None:
-                value = converters[i](value)
+            if row_converters is not None and row_converters[i] is not None \
+               and value is not None:
+                value = row_converters[i](value)
 
             # If we were in C we wouldn't need to do this, but Cython sees that
             # we are losing the reference to the object while looping and
@@ -484,14 +485,14 @@ cdef class Cursor(object):
         Statement stmt
         bint executing
         int step_status
-        list converters
+        list row_converters
 
     def __cinit__(self, Connection conn):
         self.conn = conn
         self.stmt = None
         self.executing = False
         self.description = None
-        self.converters = None
+        self.row_converters = None
         self.row_factory = conn.row_factory
 
     def __dealloc__(self):
@@ -513,7 +514,7 @@ cdef class Cursor(object):
             self.finish()
 
         self.description = None
-        self.converters = None
+        self.row_converters = None
         self.rowcount = -1
         self.lastrowid = None
 
@@ -528,7 +529,8 @@ cdef class Cursor(object):
             self.executing = True
             self.set_description()
             if self.conn.converters:
-                self.converters = self.stmt.build_row_casts()
+                self.row_converters = self.stmt.get_row_converters(
+                    self.conn.converters)
         elif self.step_status == SQLITE_DONE:
             if not self.stmt.is_dml:
                 self.set_description()
@@ -557,7 +559,7 @@ cdef class Cursor(object):
             self.finish()
 
         self.description = None
-        self.converters = None
+        self.row_converters = None
         self.rowcount = 0
         self.lastrowid = None
         self.executing = True
@@ -648,11 +650,13 @@ cdef class Cursor(object):
         elif not self.executing:
             raise StopIteration
 
-        row = None
+        cdef tuple row = None
 
         if self.step_status == SQLITE_ROW:
-            row = self.stmt.get_row_data(self.converters)
-            self.step_status = self.stmt.step()
+            try:
+                row = self.stmt.get_row_data(self.row_converters)
+            finally:
+                self.step_status = self.stmt.step()
         elif self.step_status == SQLITE_DONE:
             self.finish()
             raise StopIteration
@@ -690,7 +694,7 @@ cdef class Cursor(object):
 
     cpdef fetchone(self):
         try:
-            return next(self)
+            return self.__next__()
         except StopIteration:
             return
 
@@ -699,7 +703,7 @@ cdef class Cursor(object):
 
     cpdef value(self):
         try:
-            return next(self)[0]
+            return self.__next__()[0]
         except StopIteration:
             pass
         finally:
@@ -1209,6 +1213,18 @@ cdef class Connection(_callable_context_manager):
     def blob_open(self, table, column, rowid, read_only=False, database=None):
         check_connection(self)
         return Blob(self, table, column, rowid, read_only, database)
+
+    def register_converter(self, data_type, fn):
+        self.converters[data_type.upper()] = fn
+
+    def unregister_converter(self, data_type):
+        return bool(self.converters.pop(data_type.upper(), None))
+
+    def converter(self, data_type):
+        def inner(fn):
+            self.register_converter(data_type, fn)
+            return fn
+        return inner
 
     def load_extension(self, name):
         check_connection(self)

@@ -1,5 +1,7 @@
 import datetime
+import decimal
 import glob
+import json
 import os
 import re
 import sys
@@ -582,6 +584,20 @@ class TestQueryExecution(BaseTestCase):
             self.assertEqual(curs.fetchall(), [])
             self.assertTrue(curs.fetchone() is None)
 
+        curs = self.db.execute(
+            'insert into kv (key, value, extra) values (?, ?, ?)',
+            ('k4', 'v4', 4))
+        self.assertEqual(curs.lastrowid, 4)
+        self.assertEqual(curs.rowcount, 1)
+        self.assertTrue(curs.description is None)
+        self.assertEqual(list(curs), [])
+
+        curs = self.db.execute('update kv set extra = ? where id = ?', (40, 4))
+        self.assertEqual(curs.lastrowid, 4)
+        self.assertEqual(curs.rowcount, 1)
+        self.assertTrue(curs.description is None)
+        self.assertEqual(list(curs), [])
+
     def test_returning(self):
         sql = ('insert into kv (key, value, extra) values (?,?,?), (?,?,?) '
                'returning key')
@@ -764,6 +780,69 @@ class TestQueryTypes(BaseTestCase):
             ins(None, 3)
 
 
+class TestConverters(BaseTestCase):
+    filename = ':memory:'
+
+    def setUp(self):
+        super(TestConverters, self).setUp()
+        self.db.execute('create table conv (id integer not null primary key, '
+                        'ts datetime, js json, uu uuid, dec numeric(10), '
+                        'data text)')
+
+        @self.db.converter('datetime')
+        def convert_datetime(value):
+            return datetime.datetime.fromisoformat(value)
+
+        @self.db.converter('numeric')
+        def convert_numeric(value):
+            return Decimal(value).quantize(Decimal('1.00'))
+
+        self.db.register_converter('Json', json.loads)
+        self.db.register_converter('uuid', uuid.UUID)
+
+    def _save(self, ts, js, uu, dec, data=None):
+        self.db.execute('insert into conv (ts, js, uu, dec, data) '
+                        'values (?, ?, ?, ?, ?)', (ts, js, uu, dec, data))
+
+    def test_converters(self):
+        ts = (datetime.datetime(2026, 1, 2, 3, 4, 5)
+              .astimezone(datetime.timezone.utc))
+        js = {'k1': {'x1': 'y1'}, 'a1': ['i0', 1, 2.0], 'n': None}
+        uu = uuid.uuid4()
+        dec = decimal.Decimal('1.3')
+
+        self._save(ts, json.dumps(js), uu, dec, 'abc')
+
+        row = self.db.execute_one('select * from conv')
+        self.assertEqual(row, (1, ts, js, uu, dec, 'abc'))
+
+        self.db.unregister_converter('numeric')
+        row = self.db.execute_one('select * from conv')
+        self.assertEqual(row, (1, ts, js, uu, 1.3, 'abc'))
+
+    def test_converters_nulls(self):
+        self._save(None, None, None, None, None)
+        row = self.db.execute_one('select * from conv')
+        self.assertEqual(row, (1, None, None, None, None, None))
+
+    def test_converter_error(self):
+        self._save(None, None, None, None, None)
+        self._save(None, 'bad json', None, None, None)
+        self._save(None, '{}', None, None, None)
+
+        curs = self.db.execute('select * from conv')
+        self.assertEqual(curs.fetchone(), (1, None, None, None, None, None))
+
+        with self.assertRaises(ValueError) as exc:
+            curs.fetchone()
+
+        self.assertIn('Expecting value', str(exc.exception))
+
+        # Cursor is still operable.
+        self.assertEqual(curs.fetchone(), (3, None, {}, None, None, None))
+        self.assertTrue(curs.fetchone() is None)
+
+
 class TestRowFactory(BaseTestCase):
     filename = ':memory:'
 
@@ -853,6 +932,182 @@ class TestTransactions(BaseTestCase):
     def setUp(self):
         super(TestTransactions, self).setUp()
         self.create_table()
+        self.db.execute('create table reg (val integer)')
+
+    def assertRegister(self, expected):
+        cursor = self.db.execute('select val from reg order by val')
+        self.assertEqual([row[0] for row in cursor], expected)
+
+    def _save(self, *vals):
+        self.db.executemany('insert into reg (val) values (?)',
+                            [(v,) for v in vals])
+
+    def test_simple(self):
+        self.assertFalse(self.db.in_transaction)
+        with self.db.atomic():
+            self.assertTrue(self.db.in_transaction)
+            self._save(1)
+
+        self.assertFalse(self.db.in_transaction)
+        self.assertRegister([1])
+
+        # Explicit rollback, implicit commit.
+        with self.db.atomic() as txn:
+            self._save(2)
+            txn.rollback()
+            self.assertTrue(self.db.in_transaction)
+            self._save(3)
+
+        self.assertFalse(self.db.in_transaction)
+        self.assertRegister([1, 3])
+
+        # Explicit rollbacks.
+        with self.db.atomic() as txn:
+            self._save(4)
+            txn.rollback()
+            self._save(5)
+            txn.rollback()
+
+        self.assertRegister([1, 3])
+
+    def test_transactions(self):
+        self.assertFalse(self.db.in_transaction)
+
+        with self.db.atomic():
+            self.assertTrue(self.db.in_transaction)
+            self._save(1)
+
+        self.assertRegister([1])
+
+        with self.db.atomic() as txn:
+            self._save(2)
+            txn.rollback()
+            self._save(3)
+            with self.db.atomic() as sp1:
+                self._save(4)
+                with self.db.atomic() as sp2:
+                    self._save(5)
+                    sp2.rollback()
+                with self.db.atomic() as sp3:
+                    self._save(6)
+                    with self.db.atomic() as sp4:
+                        self._save(7)
+                        with self.db.atomic() as sp5:
+                            self._save(8)
+                        self.assertRegister([1, 3, 4, 6, 7, 8])
+                        sp4.rollback()
+
+                    self.assertRegister([1, 3, 4, 6])
+
+        self.assertRegister([1, 3, 4, 6])
+
+    def test_commit_rollback(self):
+        with self.db.atomic() as txn:
+            self._save(1)
+            txn.commit()
+            self._save(2)
+            txn.rollback()
+
+        self.assertRegister([1])
+
+        with self.db.atomic() as txn:
+            self._save(3)
+            txn.rollback()
+            self._save(4)
+
+        self.assertRegister([1, 4])
+
+    def test_commit_rollback_nested(self):
+        with self.db.atomic() as txn:
+            self.test_commit_rollback()
+            txn.rollback()
+        self.assertRegister([])
+
+        with self.db.atomic():
+            self.test_commit_rollback()
+        self.assertRegister([1, 4])
+
+    def test_nesting_transaction_obj(self):
+        self.assertRegister([])
+
+        with self.db.transaction() as txn:
+            self._save(1)
+            with self.db.transaction() as txn2:
+                self._save(2)
+                txn2.rollback()  # Actually issues a rollback.
+                self.assertRegister([])
+            self._save(3)
+        self.assertRegister([3])
+
+        with self.db.transaction() as txn:
+            self._save(4)
+            with self.db.transaction() as txn2:
+                with self.db.transaction() as txn3:
+                    self._save(5)
+                    txn3.commit()  # Actually commits.
+            self._save(6)
+            txn2.rollback()
+
+        self.assertRegister([3, 4, 5])
+
+        # The inner-most exception triggers a rollback.
+        with self.db.transaction() as txn:
+            self._save(6)
+            try:
+                with self.db.transaction() as txn2:
+                    self._save(7)
+                    raise ValueError
+            except ValueError:
+                pass
+
+        self.assertRegister([3, 4, 5])
+        self.assertFalse(self.db.in_transaction)
+
+    def test_savepoint_commit(self):
+        with self.db.atomic() as txn:
+            self._save(1)
+            txn.rollback()
+
+            self._save(2)
+            txn.commit()
+
+            with self.db.atomic() as sp:
+                self._save(3)
+                sp.rollback()
+
+                self._save(4)
+                sp.commit()
+
+        self.assertRegister([2, 4])
+
+    def test_atomic_decorator(self):
+        @self.db.atomic()
+        def save(i):
+            self._save(i)
+
+        save(1)
+        self.assertRegister([1])
+
+    def text_atomic_exception(self):
+        def will_fail(self):
+            with self.db.atomic():
+                self._save(1)
+                self._save(None)
+
+        self.assertRaises(IntegrityError, will_fail)
+        self.assertRegister([])
+
+        def user_error(self):
+            with self.db.atomic():
+                self._save(2)
+                raise ValueError
+
+        self.assertRaises(ValueError, user_error)
+        self.assertRegister([])
+
+    def test_closing_db_in_transaction(self):
+        with self.db.atomic():
+            self.assertRaises(OperationalError, self.db.close)
 
     def test_autocommit(self):
         self.assertTrue(self.db.autocommit())
