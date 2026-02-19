@@ -10,6 +10,7 @@ from cpython.buffer cimport PyObject_CheckBuffer
 from cpython.buffer cimport PyObject_GetBuffer
 from cpython.dict cimport PyDict_Check
 from cpython.dict cimport PyDict_GetItem
+from cpython.dict cimport PyDict_Next
 from cpython.float cimport PyFloat_FromDouble
 from cpython.long cimport PyLong_FromLongLong
 from cpython.mem cimport PyMem_Free
@@ -445,14 +446,14 @@ cdef class Statement(object):
                 value = None
             elif coltype == SQLITE_INTEGER:
                 value = PyLong_FromLongLong(sqlite3_column_int64(self.st, i))
-            elif coltype == SQLITE_FLOAT:
-                value = PyFloat_FromDouble(sqlite3_column_double(self.st, i))
             elif coltype == SQLITE_TEXT:
                 nbytes = sqlite3_column_bytes(self.st, i)
                 value = PyUnicode_DecodeUTF8(
                     <char *>sqlite3_column_text(self.st, i),
                     nbytes,
                     NULL)
+            elif coltype == SQLITE_FLOAT:
+                value = PyFloat_FromDouble(sqlite3_column_double(self.st, i))
             elif coltype == SQLITE_BLOB:
                 nbytes = sqlite3_column_bytes(self.st, i)
                 value = PyBytes_FromStringAndSize(
@@ -650,7 +651,8 @@ cdef class Cursor(object):
                     rc = sqlite3_step(st)
 
             if rc != SQLITE_DONE:
-                sqlite3_finalize(st)
+                with nogil:
+                    sqlite3_finalize(st)
 
                 # MISUSE is returned if statement is empty, so make sure we
                 # actually have an error.
@@ -658,7 +660,8 @@ cdef class Cursor(object):
                 if code != 0:
                     raise_sqlite_error(self.conn.db, 'error executing query: ')
 
-            rc = sqlite3_finalize(st)
+            with nogil:
+                rc = sqlite3_finalize(st)
             if rc != SQLITE_OK:
                 raise_sqlite_error(self.conn.db, 'error finalizing query: ')
 
@@ -945,10 +948,15 @@ cdef class Connection(_callable_context_manager):
         # Remove oldest statement from the cache - relies on Python 3.6
         # dictionary retaining insertion order. For older python, will simply
         # remove a random key, which is also fine.
+        cdef:
+            PyObject *key
+            PyObject *value
+            Py_ssize_t pos = 0
+
         if len(self.stmt_available) > self.cached_statements:
-            first_key = next(iter(self.stmt_available))
-            evicted = <Statement>self.stmt_available.pop(first_key)
-            evicted.finalize()
+            if PyDict_Next(self.stmt_available, &pos, &key, &value):
+                evicted = <Statement>self.stmt_available.pop(<object>key)
+                evicted.finalize()
 
     def cursor(self):
         return Cursor(self)
