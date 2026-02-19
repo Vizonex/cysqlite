@@ -2146,12 +2146,81 @@ class TestBlob(BaseTestCase):
         self.assertEqual(n, 0)
         self.assertEqual(bytes(buf), b'')
 
+    def test_blob_item_index(self):
+        rowid = self.create_blob_row(16)
+        blob = Blob(self.db, 'register', 'data', rowid)
+
+        self.assertEqual(blob[0], 0)
+        self.assertEqual(blob[15], 0)
+
+        blob.write(b'\x01\x02\x03')
+        blob.seek(0)
+        self.assertEqual(blob[0], 1)
+        self.assertEqual(blob[1], 2)
+        self.assertEqual(blob[2], 3)
+
+        blob[-2] = 0xfe
+        blob[15] = 0xff
+
+        with self.assertRaises(ValueError):
+            blob[14] = 256
+
+        with self.assertRaises(ValueError):
+            blob[14] = b'\xaa\xbb'
+
+        with self.assertRaises(IndexError):
+            blob[16] = b'\xcc'
+        with self.assertRaises(IndexError):
+            blob[-17] = b'\xcc'
+
+        self.assertEqual(blob[-1], 0xff)
+        self.assertEqual(blob[-2], 0xfe)
+        self.assertEqual(blob[-16], 1)
+
+    def test_blob_item_slice(self):
+        rowid = self.create_blob_row(16)
+        blob = Blob(self.db, 'register', 'data', rowid)
+
+        data = bytes(range(16))
+        blob.write(data)
+        self.assertEqual(blob.tell(), 16)
+        blob.seek(2)
+
+        self.assertEqual(blob[0:4], b'\x00\x01\x02\x03')
+        self.assertEqual(blob[4:8], b'\x04\x05\x06\x07')
+        self.assertEqual(blob[14:16], b'\x0e\x0f')
+
+        self.assertEqual(blob[0:0], b'')
+        self.assertEqual(blob[4:4], b'')
+
+        self.assertEqual(blob[:100], data)
+        self.assertEqual(blob[-100:], data)
+
+        # Our position hasn't changed.
+        self.assertEqual(blob.tell(), 2)
+
+        with self.assertRaises(ValueError):
+            blob[0:4] = b'\xff\xff'
+        with self.assertRaises(ValueError):
+            blob[0:4] = b'\xff\xff\xff\xff\xff'
+
+        self.assertEqual(blob[0:4], b'\x00\x01\x02\x03')
+
+        blob[0:4] = b'\xff\xfe\xfd\xfc'
+        self.assertEqual(blob[0:4], b'\xff\xfe\xfd\xfc')
+        self.assertEqual(blob[4:8], b'\x04\x05\x06\x07')
+
     def test_blob_exceed_size(self):
         rowid = self.create_blob_row(16)
 
         blob = self.db.blob_open('register', 'data', rowid)
         with self.assertRaises(ValueError):
             blob.seek(17, 0)
+
+        with self.assertRaises(IndexError):
+            blob[16]
+        with self.assertRaises(IndexError):
+            blob[-17]
 
         with self.assertRaises(ValueError):
             blob.write(b'x' * 17)
@@ -2222,6 +2291,8 @@ class TestBlob(BaseTestCase):
         blob.seek(0)
         with self.assertRaises(io.UnsupportedOperation):
             blob.write(b'meow')
+        with self.assertRaises(io.UnsupportedOperation):
+            blob.writelines([b'meow\n'])
 
         # BLOB is read-only.
         self.assertEqual(blob.read(), b'huey')

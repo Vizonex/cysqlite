@@ -2134,6 +2134,13 @@ cdef class Blob(object):
     def close(self):
         self._close()
 
+    def reopen(self, rowid):
+        _check_blob(self)
+        self.offset = 0
+        if sqlite3_blob_reopen(self.blob, <sqlite3_int64>rowid):
+            self._close()
+            raise_sqlite_error(self.conn.db, 'unable to reopen blob: ')
+
     def __enter__(self):
         _check_blob(self)
         return self
@@ -2367,12 +2374,109 @@ cdef class Blob(object):
         _check_blob(self)
         return sqlite3_blob_bytes(self.blob)
 
-    def reopen(self, rowid):
+    def __getitem__(self, key):
         _check_blob(self)
-        self.offset = 0
-        if sqlite3_blob_reopen(self.blob, <sqlite3_int64>rowid):
+        cdef:
+            int blob_size = sqlite3_blob_bytes(self.blob)
+            int idx, start, stop, length
+            bytes buf
+            char *p
+
+        if isinstance(key, int):
+            idx = key
+            if idx < 0:
+                idx += blob_size
+            if idx < 0 or idx >= blob_size:
+                raise IndexError('blob index out of range')
+
+            buf = PyBytes_FromStringAndSize(NULL, 1)
+            p = PyBytes_AS_STRING(buf)
+            if sqlite3_blob_read(self.blob, p, 1, idx):
+                self._close()
+                raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+            return <unsigned char>p[0]
+
+        if not isinstance(key, slice):
+            raise TypeError('Blob.__getitem__ must be integer or slice')
+
+        start, stop, step = key.indices(blob_size)
+        if step != 1:
+            raise ValueError('blob slice step value must be 1')
+
+        length = stop - start
+        if length <= 0:
+            return b''
+
+        buf = PyBytes_FromStringAndSize(NULL, length)
+        p = PyBytes_AS_STRING(buf)
+        if sqlite3_blob_read(self.blob, p, length, start):
             self._close()
-            raise_sqlite_error(self.conn.db, 'unable to reopen blob: ')
+            raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+        return buf
+
+    def __setitem__(self, key, value):
+        _check_blob(self)
+        if self._read_only:
+            raise _io.UnsupportedOperation('write')
+
+        cdef:
+            int blob_size = sqlite3_blob_bytes(self.blob)
+            int idx, start, stop, length
+            unsigned char byte_val
+            Py_buffer view
+
+        if isinstance(key, int):
+            idx = key
+            if idx < 0:
+                idx += blob_size
+            if idx < 0 or idx >= blob_size:
+                raise IndexError('blob index out of range')
+
+            if isinstance(value, int):
+                if not (0 <= value <= 255):
+                    raise ValueError('byte must be in range(0, 256)')
+                byte_val = <unsigned char>value
+                if sqlite3_blob_write(self.blob, &byte_val, 1, idx):
+                    raise_sqlite_error(self.conn.db, 'error writing to blob: ')
+            else:
+                if PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO):
+                    raise TypeError(
+                        'blob index assignment requires an int or a '
+                        'single-byte buffer-protocol object')
+                try:
+                    if view.len != 1:
+                        raise ValueError(
+                            'blob index assignment requires a single byte, '
+                            'got %d bytes' % view.len)
+                    if sqlite3_blob_write(self.blob, view.buf, 1, idx):
+                        raise_sqlite_error(self.conn.db,
+                                           'error writing to blob: ')
+                finally:
+                    PyBuffer_Release(&view)
+            return
+
+        if not isinstance(key, slice):
+            raise TypeError('Blob.__setitem__ must be integer or slice')
+
+        start, stop, step = key.indices(blob_size)
+        if step != 1:
+            raise ValueError('blob slice step value must be 1')
+
+        length = stop - start
+        if PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO):
+            raise TypeError(
+                'blob slice assignment requires a buffer-protocol object '
+                '(e.g. bytes, bytearray, memoryview)')
+        try:
+            if view.len != length:
+                raise ValueError(
+                    'blob slice of length %d cannot be assigned from a '
+                    'buffer of length %d' % (length, view.len))
+            if length > 0:
+                if sqlite3_blob_write(self.blob, view.buf, length, start):
+                    raise_sqlite_error(self.conn.db, 'error writing to blob: ')
+        finally:
+            PyBuffer_Release(&view)
 
 
 # Support RawIOBase.

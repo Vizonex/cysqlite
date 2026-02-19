@@ -1752,6 +1752,13 @@ Blob
       Allow the blob to be used as a context-manager, closing when the wrapped
       block exits.
 
+   .. method:: __getitem__(key)
+               __setitem__(key, value)
+
+      :param key: an integer index or a ``slice``.
+
+      Read or write to the given index/slice.
+
 
 TableFunction
 -------------
