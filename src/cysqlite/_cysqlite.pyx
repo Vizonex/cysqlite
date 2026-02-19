@@ -429,12 +429,6 @@ cdef class Statement(object):
             name = (<str>name).upper()
             if name in mapping:
                 converters[i] = mapping[name]
-            else:
-                name = PyUnicode_FromString(decltype)
-                if name is not None:
-                    name = (<str>name).upper()
-                    if name in mapping:
-                        converters[i] = mapping[name]
 
         return converters
 
@@ -611,7 +605,7 @@ cdef class Cursor(object):
                 self.abort()
                 raise OperationalError('executemany() cannot generate results')
             elif self.step_status == SQLITE_DONE:
-                self.rowcount += self.conn.changes()
+                self.rowcount = self.rowcount + self.conn.changes()
                 self.stmt.reset()
             else:
                 self.abort()
@@ -1047,7 +1041,7 @@ cdef class Connection(_callable_context_manager):
     def rollback(self):
         self._execute_internal('ROLLBACK')
 
-    def changes(self):
+    cpdef int changes(self):
         check_connection(self)
         return sqlite3_changes(self.db)
 
@@ -1055,7 +1049,7 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         return sqlite3_total_changes(self.db)
 
-    def last_insert_rowid(self):
+    cpdef int last_insert_rowid(self):
         check_connection(self)
         return sqlite3_last_insert_rowid(self.db)
 

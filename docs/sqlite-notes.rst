@@ -106,8 +106,8 @@ you might register the following:
        # Converts our ISO-formatted date string into a python datetime.
        return datetime.datetime.fromisoformat(value)
 
-If the value is ``NULL`` then the convert is **not** applied, so you do not
-need to test for ``value is None``.
+If the value is ``NULL`` then the convert function is **not** applied, so you
+do not need to test for ``value is None``.
 
 Below are some examples:
 
@@ -148,7 +148,6 @@ The converter accepts a ``data_type`` and uses the following rules for matching
 a specified data-type to what SQLite tells us:
 
 * Matching is case-insensitive, e.g. ``JSON`` or ``json`` is fine.
-* If a registered data-type is a complete match, use it.
-* Otherwise split on the first whitespace or ``"("`` character and look for
-  that, e.g. ``NUMERIC(10, 2)`` will match our registered ``numeric``
-  converter.
+* Split on the first whitespace or ``"("`` character, e.g. if SQLite
+  tells us the data-type is ``NUMERIC(10, 2)``, cysqlite will attempt to
+  find a converter named ``numeric``.

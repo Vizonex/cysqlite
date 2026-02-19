@@ -152,6 +152,14 @@ Connection
       :param str data_type: declared SQLite data-type to apply conversion to.
       :param fn: ``callable`` that accepts a single value and converts it.
 
+      The converter ``data_type`` uses the following rules for matching what
+      SQLite tells us:
+
+      * Matching is case-insensitive, e.g. ``JSON`` or ``json`` is fine.
+      * Split on the first whitespace or ``"("`` character, e.g. if SQLite
+        tells us the data-type is ``NUMERIC(10, 2)``, cysqlite will attempt to
+        find a converter named ``numeric``.
+
       .. seealso:: :meth:`Connection.converter` decorator.
 
       Example:
@@ -169,7 +177,7 @@ Connection
              # Converts our ISO-formatted date string into a python datetime.
              return datetime.datetime.fromisoformat(value)
 
-         # Handle decimal data.
+         # Handle decimal data, matches NUMERIC or NUMERIC(10, 2).
          @db.converter('numeric')
          def convert_numeric(value):
              return Decimal(value).quantize(Decimal('1.00'))
@@ -190,14 +198,17 @@ Connection
          row = db.execute_one('select * from vals')
          assert row == (ts, js, dec)
 
-      The converter ``data_type`` uses the following rules for matching what
-      SQLite tells us:
+      NULL values from SQLite are not converted, so your converter function
+      does not need to handle ``None``:
 
-      * Matching is case-insensitive, e.g. ``JSON`` or ``json`` is fine.
-      * If a registered data-type is a complete match, use it.
-      * Otherwise split on the first whitespace or ``"("`` character and look for
-        that, e.g. ``NUMERIC(10, 2)`` will match our registered ``numeric``
-        converter.
+      .. code-block:: python
+
+         db.execute('insert into vals (ts, js, dec) values (?, ?, ?)',
+                    (None, None, None))
+
+         # Converters are not applied when value is NULL/None.
+         row = db.execute_one('select * from vals')
+         assert row == (None, None, None)
 
       .. seealso::  :ref:`sqlite-notes` for more information on SQLite data-types.
 
