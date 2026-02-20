@@ -90,7 +90,7 @@ class BaseTestCase(unittest.TestCase):
 
     def assertCount(self, n):
         curs = self.db.execute('select count(*) from kv')
-        self.assertEqual(curs.value(), n)
+        self.assertEqual(curs.scalar(), n)
 
     def assertKeys(self, expected):
         curs = self.db.execute('select key from kv order by key')
@@ -244,10 +244,10 @@ class TestCheckConnection(BaseTestCase):
         # We can close and re-execute.
         curs.close()
 
-        self.assertEqual(curs.execute('select 1').value(), 1)
+        self.assertEqual(curs.execute('select 1').scalar(), 1)
         self.assertEqual(self.db.get_stmt_usage(), (5, 0))
 
-        self.assertEqual(curs.execute('select 2').value(), 2)
+        self.assertEqual(curs.execute('select 2').scalar(), 2)
         self.assertEqual(self.db.get_stmt_usage(), (5, 0))
 
 
@@ -315,10 +315,10 @@ class TestExecute(BaseTestCase):
         self.assertTrue(res is None)
 
         curs = self.db.execute('select sum(v) from g')
-        self.assertEqual(curs.value(), 6)
+        self.assertEqual(curs.scalar(), 6)
 
         curs = self.db.execute('select 1 where 1 = 0')
-        self.assertTrue(curs.value() is None)
+        self.assertTrue(curs.scalar() is None)
 
         curs = self.db.execute('select * from g')
         curs.close()
@@ -376,7 +376,7 @@ class TestExecute(BaseTestCase):
                          ['t1', 't4', 't5', 't6'])
 
         # Ensure cursor is usable.
-        self.assertEqual(cursor.execute('select 1').value(), 1)
+        self.assertEqual(cursor.execute('select 1').scalar(), 1)
 
     def test_execute_invalid_sql(self):
         with self.assertRaises(OperationalError):
@@ -1263,7 +1263,7 @@ class TestTransactions(BaseTestCase):
 
         self.assertTrue(self.db.autocommit())
         self.assertCount(1)
-        self.assertEqual(self.db.execute('select key from kv').value(), 'k1')
+        self.assertEqual(self.db.execute('select key from kv').scalar(), 'k1')
 
         # Explicit commit and implicit rollback in inner (savepoint) block.
         with self.db.atomic() as txn:
@@ -1280,7 +1280,7 @@ class TestTransactions(BaseTestCase):
 
         self.assertTrue(self.db.autocommit())
         self.assertCount(1)
-        self.assertEqual(self.db.execute('select key from kv').value(), 'k3')
+        self.assertEqual(self.db.execute('select key from kv').scalar(), 'k3')
 
     def test_explicit_rollback(self):
         # Explicit rollback and implicit commit in outer (transaction) block.
@@ -1292,7 +1292,7 @@ class TestTransactions(BaseTestCase):
 
         self.assertTrue(self.db.autocommit())
         self.assertCount(1)
-        self.assertEqual(self.db.execute('select key from kv').value(), 'k2')
+        self.assertEqual(self.db.execute('select key from kv').scalar(), 'k2')
 
         # Explicit rollback and implicit commit in inner (savepoint) block.
         with self.db.atomic() as txn:
@@ -1305,7 +1305,7 @@ class TestTransactions(BaseTestCase):
 
         self.assertTrue(self.db.autocommit())
         self.assertCount(1)
-        self.assertEqual(self.db.execute('select key from kv').value(), 'k4')
+        self.assertEqual(self.db.execute('select key from kv').scalar(), 'k4')
 
 
 class TestUserDefinedCallbacks(BaseTestCase):
@@ -1357,7 +1357,7 @@ class TestUserDefinedCallbacks(BaseTestCase):
         def run(*args):
             params = ', '.join(['?' for _ in args])
             curs = self.db.execute('select myadd(%s)' % params, args)
-            return curs.value()
+            return curs.scalar()
 
         self.assertEqual(run(1, 2), 3)
         self.assertEqual(run('a', 'bc'), 'abc')
@@ -1378,7 +1378,7 @@ class TestUserDefinedCallbacks(BaseTestCase):
 
         self.db.create_aggregate(Sum, 'mysum', 1)
         curs = self.db.execute('select mysum(extra) from kv')
-        self.assertEqual(curs.value(), 60)
+        self.assertEqual(curs.scalar(), 60)
 
     def test_aggregate_broken_init(self):
         class BrokenInit(object):
@@ -1898,14 +1898,14 @@ class TestBackup(BaseTestCase):
         self.db.executemany('insert into g (k, v) values (?, ?)',
                             [('k%02d' % i, 'v%02d' % i) for i in range(100)])
         curs = self.db.cursor()
-        self.assertEqual(curs.execute('select count(*) from g').value(), 100)
+        self.assertEqual(curs.execute('select count(*) from g').scalar(), 100)
 
         new = Connection(':memory:', autoconnect=False)
         self.assertRaises(OperationalError, self.db.backup, new)
 
         new.connect()
         self.db.backup(new)
-        self.assertEqual(new.execute('select count(*) from g').value(), 100)
+        self.assertEqual(new.execute('select count(*) from g').scalar(), 100)
 
 
 class TestStatementUsage(BaseTestCase):
@@ -1944,7 +1944,7 @@ class TestStatementUsage(BaseTestCase):
 
         curs = self.db.execute('select count(*) from kv')
         self.assertEqual(self.db.get_stmt_usage(), (1, 1))
-        self.assertEqual(curs.value(), 0)  # value() recycles curs.
+        self.assertEqual(curs.scalar(), 0)  # value() recycles curs.
         self.assertEqual(self.db.get_stmt_usage(), (2, 0))
 
     def test_statement_reuse(self):
@@ -2017,7 +2017,7 @@ class TestStatementUsage(BaseTestCase):
         for i in range(20):
             self.db.execute('insert into g(k) values (%s)' % i)
         self.assertEqual(self.db.get_stmt_usage(), (10, 0))
-        self.assertEqual(self.db.execute('select count(*) from g').value(), 20)
+        self.assertEqual(self.db.execute('select count(*) from g').scalar(), 20)
 
     def test_statement_after_close(self):
         curs = self.db.execute('select 1')
@@ -2373,7 +2373,7 @@ class TestLargeValues(BaseTestCase):
                         'value text not null)')
 
     def assertCount(self, ct):
-        self.assertEqual(self.db.execute('select count(*) from g').value(), ct)
+        self.assertEqual(self.db.execute('select count(*) from g').scalar(), ct)
 
     def test_large_insert_select(self):
         data = [(i, 'v%08d' % i) for i in range(10000)]

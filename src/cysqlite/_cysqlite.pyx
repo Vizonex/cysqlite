@@ -671,10 +671,7 @@ cdef class Cursor(object):
 
         return self
 
-    def __iter__(self):
-        return self
-
-    def __next__(self):
+    cdef tuple _get_current_row(self):
         if self.conn.db == NULL:
             self.executing = False
             raise OperationalError('Database was closed.')
@@ -697,6 +694,14 @@ cdef class Cursor(object):
         else:
             self.abort()
             raise_sqlite_error(self.conn.db, 'error executing query: ')
+
+        return row
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        cdef tuple row = self._get_current_row()
         return self._build_row(row)
 
     cdef _build_row(self, tuple data):
@@ -735,10 +740,10 @@ cdef class Cursor(object):
     cpdef fetchall(self):
         return list(self)
 
-    cpdef value(self):
+    cpdef scalar(self):
         try:
-            return self.__next__()[0]
-        except StopIteration:
+            return self._get_current_row()[0]
+        except (IndexError, StopIteration):
             pass
         finally:
             self.finish()
@@ -985,9 +990,7 @@ cdef class Connection(_callable_context_manager):
     def execute_scalar(self, sql, params=None):
         check_connection(self)
         cdef Cursor cursor = Cursor(self)
-        res = cursor.execute(sql, params).fetchone()
-        if res is not None:
-            return res[0]
+        return cursor.execute(sql, params).scalar()
 
     def execute_simple(self, sql, callback=None):
         check_connection(self)

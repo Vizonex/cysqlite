@@ -1535,7 +1535,7 @@ Cursor
          print(curs.fetchall())  # [(1,)]
          print(curs.fetchall())  # []
 
-   .. method:: value()
+   .. method:: scalar()
 
       Fetch a single scalar value from the query result set. If no results are
       available or cursor has been consumed returns ``None``.
@@ -1545,8 +1545,8 @@ Cursor
       .. code-block:: python
 
          curs = db.execute('select 1')
-         print(curs.value())  # 1
-         print(curs.value())  # None
+         print(curs.scalar())  # 1
+         print(curs.scalar())  # None
 
    .. method:: close()
 
