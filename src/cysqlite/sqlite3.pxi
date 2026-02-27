@@ -134,9 +134,6 @@ cdef extern from "sqlite3.h" nogil:
     cdef int SQLITE_DBCONFIG_ENABLE_QPSG  # int int*
     cdef int SQLITE_DBCONFIG_TRIGGER_EQP  # int int*
     cdef int SQLITE_DBCONFIG_RESET_DATABASE  # int int*
-    cdef int SQLITE_DBCONFIG_DEFENSIVE  # int int*
-    cdef int SQLITE_DBCONFIG_WRITABLE_SCHEMA  # int int*
-    cdef int SQLITE_DBCONFIG_MAX  # Largest DBCONFIG
 
     cdef int SQLITE_DENY  # Abort the SQL statement with an error
     cdef int SQLITE_IGNORE  # Don't allow access, but don't generate an error
