@@ -1359,6 +1359,13 @@ Connection
 
       Enable or disable triggers from being executed.
 
+   .. method:: db_config(op, setting=None)
+
+      :param int op: ``SQLITE_DB_CONFIG_`` constant.
+      :param int setting: New value for setting or ``None``.
+
+      Interface to ``sqlite3_db_config()``.
+
    .. method:: setlimit(category, limit)
                getlimit(category)
 
@@ -1367,6 +1374,14 @@ Connection
 
       See `sqlite3 run-time limit categories <https://www.sqlite.org/c3ref/c_limit_attached.html#sqlitelimitattached>`_
       for details.
+
+   .. method:: file_control(op, val, name=None)
+
+      :param int op: ``SQLITE_FCNTL_`` constant.
+      :param int val: Value for operation.
+      :param str name: optional name for database to apply fcntl to.
+
+      Interface to ``sqlite3_file_control()``.
 
 
 Cursor

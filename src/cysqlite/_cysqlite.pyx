@@ -1524,14 +1524,14 @@ cdef class Connection(_callable_context_manager):
                              <const char *>bname) != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting main db name: ')
 
-    def db_config(self, config, enabled=None):
+    def db_config(self, op, setting=None):
         check_connection(self)
         cdef:
             int rc, status
-            int iconfig = int(config)
-            int flag = -1 if enabled is None else int(enabled)
+            int iop= int(op)
+            int isetting = -1 if setting is None else int(setting)
 
-        rc = sqlite3_db_config(self.db, iconfig, flag, &status)
+        rc = sqlite3_db_config(self.db, iop, isetting, &status)
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting config value: ')
         return status
