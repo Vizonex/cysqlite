@@ -163,6 +163,18 @@ class TestOpenConnection(unittest.TestCase):
         limit2 = db.getlimit(SQLITE_LIMIT_LENGTH)
         self.assertEqual(limit2, limit - 1)
 
+    def test_db_config(self):
+        db = Connection(':memory:')
+        db.set_foreign_keys_enabled(True)
+        self.assertTrue(db.get_foreign_keys_enabled())
+
+        db.set_foreign_keys_enabled(False)
+        self.assertFalse(db.get_foreign_keys_enabled())
+
+        self.assertEqual(db.db_config(SQLITE_DBCONFIG_ENABLE_FKEY, -1), 0)
+        self.assertEqual(db.db_config(SQLITE_DBCONFIG_ENABLE_FKEY, 1), 1)
+        self.assertTrue(db.get_foreign_keys_enabled())
+
 
 class TestCheckConnection(BaseTestCase):
     filename = ':memory:'

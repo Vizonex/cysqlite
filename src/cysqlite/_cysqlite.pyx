@@ -1523,25 +1523,31 @@ cdef class Connection(_callable_context_manager):
         if sqlite3_db_config(self.db, SQLITE_DBCONFIG_MAINDBNAME,
                              <const char *>bname) != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting main db name: ')
-    def db_config(self, int config, int enabled):
+
+    def db_config(self, config, enabled=None):
         check_connection(self)
-        cdef int rc, status
-        rc = sqlite3_db_config(self.db, config, enabled, &status)
+        cdef:
+            int rc, status
+            int iconfig = int(config)
+            int flag = -1 if enabled is None else int(enabled)
+
+        rc = sqlite3_db_config(self.db, iconfig, flag, &status)
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting config value: ')
         return status
+
     def set_foreign_keys_enabled(self, int enabled):
         return self.db_config(SQLITE_DBCONFIG_ENABLE_FKEY, enabled)
     def get_foreign_keys_enabled(self):
-        return self.db_config(SQLITE_DBCONFIG_ENABLE_FKEY, -1)
+        return self.db_config(SQLITE_DBCONFIG_ENABLE_FKEY)
     def set_triggers_enabled(self, int enabled):
         return self.db_config(SQLITE_DBCONFIG_ENABLE_TRIGGER, enabled)
     def get_triggers_enabled(self):
-        return self.db_config(SQLITE_DBCONFIG_ENABLE_TRIGGER, -1)
+        return self.db_config(SQLITE_DBCONFIG_ENABLE_TRIGGER)
     def set_load_extension(self, int enabled):
         return self.db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, enabled)
     def get_load_extension(self):
-        return self.db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, -1)
+        return self.db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION)
     def set_shared_cache(self, int enabled):
         check_connection(self)
         cdef int rc = sqlite3_enable_shared_cache(enabled)
