@@ -153,6 +153,16 @@ class TestOpenConnection(unittest.TestCase):
             self.assertFalse(db.is_closed())
         self.assertTrue(db.is_closed())
 
+    def test_error_closing(self):
+        db = Connection(':memory:')
+        with self.assertRaises(ValueError) as ctx:
+            with db:
+                with db.atomic() as txn:
+                    raise ValueError('fail')
+
+        self.assertTrue(isinstance(ctx.exception, ValueError))
+        self.assertEqual(ctx.exception.args[0], 'fail')
+
     def test_limit(self):
         db = Connection(':memory:')
         limit = db.getlimit(SQLITE_LIMIT_LENGTH)

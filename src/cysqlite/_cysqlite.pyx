@@ -950,7 +950,16 @@ cdef class Connection(_callable_context_manager):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        if exc_type is not None:
+            # An exception is already being raised, so make a best-effort to
+            # close, but do not swallow the original error (if close() fails).
+            try:
+                self.close()
+            except Exception:
+                pass
+        else:
+            self.close()
+        return False
 
     @property
     def callback_error(self):
