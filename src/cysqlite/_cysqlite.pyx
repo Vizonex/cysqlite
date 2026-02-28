@@ -162,6 +162,15 @@ cdef class Row(object):
             return self._data[self._name_map[key]]
         raise TypeError('__getitem__ accepts index or string key')
 
+    def __contains__(self, key):
+        self._build_name_map()
+        return key in self._name_map
+
+    def get(self, key, default=None):
+        self._build_name_map()
+        idx = self._name_map.get(key)
+        return self._data[idx] if idx is not None else default
+
     def __getattr__(self, name):
         if name.startswith('_'):
             raise AttributeError('Invalid lookup')
@@ -523,6 +532,12 @@ cdef class Cursor(object):
             self.stmt.reset()
             self.conn.stmt_release(self.stmt)
             self.stmt = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finish()
 
     cdef set_description(self):
         cdef:
@@ -2766,7 +2781,7 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
 
     table_func = <object>pCur.table_func
 
-    if (idxStr == NULL or argc == 0) and len(table_func.params):
+    if (idxStr == NULL or argc == 0) and table_func._nparams:
         return SQLITE_ERROR
     elif idxStr != NULL and len(idxStr):
         params = decode(idxStr).split(',')
@@ -2833,7 +2848,7 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
         return SQLITE_ERROR
 
     table_func_cls = <object>pVtab.table_func_cls
-    nParams = len(table_func_cls.params)
+    nParams = table_func_cls._nparams
 
     for i in range(pIdxInfo.nConstraint):
         pConstraint = <sqlite3_index_constraint *>pIdxInfo.aConstraint + i
@@ -3020,13 +3035,15 @@ class TableFunction(object):
     params = None
     name = None
     print_tracebacks = True
-    _ncols = None
+    _ncols = 0
+    _nparams = 0
 
     @classmethod
     def register(cls, Connection conn):
         cdef _TableFunctionImpl impl = _TableFunctionImpl(cls)
         impl.create_module(conn)
-        cls._ncols = len(cls.columns)
+        cls._ncols = len(cls.columns) if cls.columns is not None else 0
+        cls._nparams = len(cls.params) if cls.params is not None else 0
 
     def initialize(self, **filters):
         """

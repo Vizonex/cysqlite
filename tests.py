@@ -1775,8 +1775,9 @@ class TestUserDefinedCallbacks(BaseTestCase):
         def broken(row):
             raise ValueError('broken cb')
 
-        with self.assertRaises(OperationalError):
-            self.db.execute_simple('select * from kv', broken)
+        for i in range(10):
+            with self.assertRaises(OperationalError):
+                self.db.execute_simple('select * from kv', broken)
 
         self.assertCallbackError('broken cb', ValueError)
 
