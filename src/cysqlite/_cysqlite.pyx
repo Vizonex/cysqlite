@@ -955,8 +955,8 @@ cdef class Connection(_callable_context_manager):
             # close, but do not swallow the original error (if close() fails).
             try:
                 self.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                raise exc from exc_val
         else:
             self.close()
         return False

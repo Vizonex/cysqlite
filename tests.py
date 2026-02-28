@@ -160,8 +160,16 @@ class TestOpenConnection(unittest.TestCase):
                 with db.atomic() as txn:
                     raise ValueError('fail')
 
-        self.assertTrue(isinstance(ctx.exception, ValueError))
-        self.assertEqual(ctx.exception.args[0], 'fail')
+        with self.assertRaises(OperationalError) as ctx:
+            with db:
+                txn = db.transaction()
+                txn.__enter__()  # This will cause close() to fail.
+                raise ValueError('fail2')
+
+            # Close failed.
+            self.assertFalse(db.is_closed())
+            txn.__exit__(None, None, None)
+            self.assertTrue(db.close())
 
     def test_limit(self):
         db = Connection(':memory:')
