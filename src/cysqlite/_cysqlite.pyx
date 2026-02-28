@@ -906,7 +906,7 @@ cdef class Connection(_callable_context_manager):
             bvfs = encode(self.vfs)
             zvfs = PyBytes_AsString(bvfs)
 
-        if self.uri or bdatabase.startswith(b'file:') >= 0:
+        if self.uri or bdatabase.startswith(b'file:'):
             flags |= SQLITE_OPEN_URI
 
         with nogil:
@@ -1111,7 +1111,7 @@ cdef class Connection(_callable_context_manager):
             key = '"%s".%s' % (database, key)
         sql = 'PRAGMA %s' % key
         if value is not SENTINEL:
-            sql += ' = %s' % (value or 0)
+            sql += ' = %s' % (value if value is not None else 0)
 
         curs = self.execute(sql)
         if multi:
@@ -1634,7 +1634,6 @@ cdef class Connection(_callable_context_manager):
         cdef:
             bytes bname
             const char *zDb = NULL
-            int ival = val
 
         if name:
             bname = encode(name)
@@ -1807,7 +1806,7 @@ cdef int _collation_cb(void *data, int n1, const void *data1,
 
     str1 = PyUnicode_DecodeUTF8(<const char *>data1, n1, "replace")
     str2 = PyUnicode_DecodeUTF8(<const char *>data2, n2, "replace")
-    if not str1 or not str2:
+    if str1 is None or str2 is None:
         return result
 
     try:
@@ -2162,8 +2161,9 @@ cdef class Blob(object):
             &blob)
 
         if rc != SQLITE_OK:
-            raise OperationalError('Unable to open blob "%s"."%s" row %s.' %
-                                   (table, column, rowid))
+            raise_sqlite_error(self.conn.db,
+                               'Unable to open blob "%s"."%s" row %s: ' %
+                               (table, column, rowid))
         if blob == NULL:
             raise MemoryError('Unable to allocate blob.')
 
@@ -2382,12 +2382,8 @@ cdef class Blob(object):
             if buflen > <Py_ssize_t>INT_MAX:
                 raise ValueError('Data is too large')
             n = <int>buflen
-            if n > 0 and (n + self.offset) < self.offset:
-                raise ValueError('Data is too large (integer wrap)')
-            if (n + self.offset) > blob_size:
-                raise ValueError('Data would go beyond end of blob '
-                                 '(offset=%d, nbytes=%d, blob_size=%d)' %
-                                 (self.offset, n, blob_size))
+            if n > 0 and (<int64_t>n + <int64_t>self.offset) > <int64_t>blob_size:
+                raise ValueError('Data would go beyond end of blob.')
 
             if sqlite3_blob_write(self.blob, buf, n, self.offset):
                 raise_sqlite_error(self.conn.db, 'error writing to blob: ')
@@ -2917,18 +2913,10 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
         # UPDATE: argc > 1 and argv[0] is not NULL
         if argc == 1:
             # DELETE operation
-            if not hasattr(table_func, 'delete'):
-                set_vtab_error(pBase, encode('DELETE not supported'))
-                return SQLITE_READONLY
-
             rowid = py_values[0]
             result = table_func.delete(rowid)
         elif py_values[0] is None:
             # INSERT operation (argv[0] is NULL)
-            if not hasattr(table_func, 'insert'):
-                set_vtab_error(pBase, encode('INSERT not supported'))
-                return SQLITE_READONLY
-
             # argv[1] is new rowid (or NULL for auto-generate)
             # argv[2:] are the column values
             new_rowid_val = py_values[1] if len(py_values) > 1 else None
@@ -2940,10 +2928,6 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
                 pRowid[0] = <sqlite3_int64>result
         else:
             # UPDATE operation (argv[0] is old rowid)
-            if not hasattr(table_func, 'update'):
-                set_vtab_error(pBase, encode('UPDATE not supported'))
-                return SQLITE_READONLY
-
             old_rowid = py_values[0]
             new_rowid_val = py_values[1] if len(py_values) > 1 else old_rowid
             column_values = py_values[2:] if len(py_values) > 2 else []
@@ -3337,6 +3321,7 @@ def rank_lucene(py_match_info, *raw_weights):
         int P_O = 0, C_O = 1, N_O = 2, L_O, X_O
         int iphrase, icol, x
         double score = 0.0
+        Py_ssize_t required_size
 
     PyBytes_AsStringAndSize(_match_info_buf, &match_info_buf, &buf_size)
     if buf_size < <Py_ssize_t>(sizeof(unsigned int) * 3):
@@ -3352,6 +3337,12 @@ def rank_lucene(py_match_info, *raw_weights):
     weights = get_weights(ncol, raw_weights)
     if weights == NULL:
         raise MemoryError
+
+    required_size = <Py_ssize_t>((X_O + 3 * nphrase * ncol) *
+                                 sizeof(unsigned int))
+    if buf_size < required_size:
+        PyMem_Free(weights)
+        raise ValueError('matchinfo buffer size incorrect')
 
     for iphrase in range(nphrase):
         for icol in range(ncol):
@@ -3388,6 +3379,7 @@ def rank_bm25(py_match_info, *raw_weights):
         int P_O = 0, C_O = 1, N_O = 2, A_O = 3, L_O, X_O
         int iphrase, icol, x
         double score = 0.0
+        Py_ssize_t required_size
 
     PyBytes_AsStringAndSize(_match_info_buf, &match_info_buf, &buf_size)
     if buf_size < <Py_ssize_t>(sizeof(unsigned int) * 3):
@@ -3413,6 +3405,12 @@ def rank_bm25(py_match_info, *raw_weights):
     weights = get_weights(ncol, raw_weights)
     if weights == NULL:
         raise MemoryError
+
+    required_size = <Py_ssize_t>((X_O + 3 * nphrase * ncol) *
+                                 sizeof(unsigned int))
+    if buf_size < required_size:
+        PyMem_Free(weights)
+        raise ValueError('matchinfo buffer size incorrect')
 
     for iphrase in range(nphrase):
         for icol in range(ncol):
