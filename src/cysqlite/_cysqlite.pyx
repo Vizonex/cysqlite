@@ -3516,53 +3516,43 @@ cdef class median(object):
         self.ct = 0
         self.items = []
 
-    cdef selectKth(self, int k, int s=0, int e=-1):
-        cdef:
-            int idx
-        if e < 0:
-            e = len(self.items)
-        idx = randint(s, e-1)
-        idx = self.partition_k(idx, s, e)
-        if idx > k:
-            return self.selectKth(k, s, idx)
-        elif idx < k:
-            return self.selectKth(k, idx + 1, e)
-        else:
-            return self.items[idx]
-
-    cdef int partition_k(self, int pi, int s, int e):
-        cdef:
-            int i, x
-
-        val = self.items[pi]
-        # Swap pivot w/last item.
-        self.items[e - 1], self.items[pi] = self.items[pi], self.items[e - 1]
-        x = s
-        for i in range(s, e):
-            if self.items[i] < val:
-                self.items[i], self.items[x] = self.items[x], self.items[i]
-                x += 1
-        self.items[x], self.items[e-1] = self.items[e-1], self.items[x]
-        return x
+    def step(self, item):
+        cdef int lo = 0, hi = self.ct, mid
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if item < self.items[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        self.items.insert(lo, item)
+        self.ct += 1
 
     def inverse(self, item):
-        self.items.remove(item)
+        cdef int lo = 0, hi = self.ct, mid
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if self.items[mid] < item:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo >= self.ct or self.items[lo] != item:
+            assert False, 'item %s not found in window' % item
+        del self.items[lo]
         self.ct -= 1
-
-    def step(self, item):
-        self.items.append(item)
-        self.ct += 1
 
     def finalize(self):
         if self.ct == 0:
             return None
-        elif self.ct == 1:
+        if self.ct == 1:
             return self.items[0]
-        elif self.ct == 2:
-            return (self.items[0] + self.items[1]) / 2.
+        cdef int mid = self.ct >> 1
+        if self.ct & 1:
+            return self.items[mid]
         else:
-            return self.selectKth(self.ct // 2)
-    value = finalize
+            return (self.items[mid - 1] + self.items[mid]) / 2.
+
+    def value(self):
+        return self.finalize()
 
 
 cdef int _aggressive_busy_handler(void *ptr, int n) noexcept nogil:
