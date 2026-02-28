@@ -653,7 +653,9 @@ cdef class Cursor(object):
 
             if rc != SQLITE_DONE:
                 with nogil:
-                    sqlite3_finalize(st)
+                    rc = sqlite3_finalize(st)
+
+                st = NULL
 
                 # MISUSE is returned if statement is empty, so make sure we
                 # actually have an error.
@@ -661,10 +663,11 @@ cdef class Cursor(object):
                 if code != 0:
                     raise_sqlite_error(self.conn.db, 'error executing query: ')
 
-            with nogil:
-                rc = sqlite3_finalize(st)
-            if rc != SQLITE_OK:
-                raise_sqlite_error(self.conn.db, 'error finalizing query: ')
+            if st != NULL:
+                with nogil:
+                    rc = sqlite3_finalize(st)
+                if rc != SQLITE_OK:
+                    raise_sqlite_error(self.conn.db, 'error finalizing: ')
 
             if tail[0] == 0:
                 break
@@ -808,7 +811,7 @@ cdef class Connection(_callable_context_manager):
         if self.db:
             sqlite3_close_v2(self.db)
 
-    def finalize_statements(self, finalize=True):
+    def finalize_statements(self):
         cdef Statement stmt
         for stmt in list(self.stmt_in_use.values()):
             stmt.finalize()
@@ -888,7 +891,7 @@ cdef class Connection(_callable_context_manager):
             bvfs = encode(self.vfs)
             zvfs = PyBytes_AsString(bvfs)
 
-        if self.uri or bdatabase.find(b'://') >= 0:
+        if self.uri or bdatabase.startswith(b'file:') >= 0:
             flags |= SQLITE_OPEN_URI
 
         with nogil:
@@ -1012,7 +1015,13 @@ cdef class Connection(_callable_context_manager):
         try:
             rc = sqlite3_exec(self.db, bsql, _exec_callback, userdata, &errmsg)
             if rc != SQLITE_OK:
-                raise_sqlite_error(self.db, 'error executing query: ')
+                if errmsg != NULL:
+                    msg = decode(errmsg)
+                    sqlite3_free(errmsg)
+                    errmsg = NULL
+                else:
+                    msg = decode(sqlite3_errmsg(self.db))
+                raise OperationalError('error executing query: %s' % msg)
         except Exception:
             raise
         finally:
@@ -1057,7 +1066,7 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         return sqlite3_total_changes(self.db)
 
-    cpdef int last_insert_rowid(self):
+    cpdef long long last_insert_rowid(self):
         check_connection(self)
         return sqlite3_last_insert_rowid(self.db)
 
@@ -1506,10 +1515,13 @@ cdef class Connection(_callable_context_manager):
 
     def attach(self, filename, name):
         check_connection(self)
+        filename = filename.replace('"', '""')
+        name = name.replace('"', '""')
         self.execute_one('attach database "%s" as "%s"' % (filename, name))
 
     def detach(self, name):
         check_connection(self)
+        name = name.replace('"', '""')
         self.execute_one('detach database "%s"' % name)
 
     def database_list(self):
@@ -1617,7 +1629,7 @@ cdef class Connection(_callable_context_manager):
             rc = sqlite3_file_control(self.db, zDb, <int>op, &val)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, rc)
+            raise_sqlite_error(self.db, 'error in file control: ')
 
         return val
 
@@ -3442,7 +3454,7 @@ def damerau_levenshtein_dist(s1, s2):
             current_row[j] = min(del_cost, add_cost, sub_cost)
 
             # Handle transpositions.
-            if (i > 0 and j > 0 and s1[i] == s2[j - 1]
+            if (i > 0 and j > 1 and s1[i] == s2[j - 1]
                 and s1[i-1] == s2[j] and s1[i] != s2[j]):
                 current_row[j] = min(current_row[j], two_ago[j - 2] + 1)
 
