@@ -103,13 +103,13 @@ cdef raise_sqlite_error(sqlite3 *db, unicode msg):
     else:
         errmsg = '(db handle is NULL)'
 
-    if code in (SQLITE_CONSTRAINT,):
+    if code == SQLITE_CONSTRAINT:
         exc = IntegrityError
-    elif code in (SQLITE_MISUSE,):
+    elif code == SQLITE_MISUSE:
         exc = ProgrammingError
-    elif code in (SQLITE_INTERNAL,):
+    elif code == SQLITE_INTERNAL:
         exc = InternalError
-    elif code in (SQLITE_NOMEM,):
+    elif code == SQLITE_NOMEM:
         exc = MemoryError
     elif code in (SQLITE_ABORT, SQLITE_INTERRUPT):
         exc = OperationalError
@@ -158,7 +158,7 @@ cdef class Row(object):
         elif isinstance(key, str):
             self._build_name_map()
             if key not in self._name_map:
-                raise KeyError('No column named "%s"' % key)
+                raise KeyError(f'No column named "{key}"')
             return self._data[self._name_map[key]]
         raise TypeError('__getitem__ accepts index or string key')
 
@@ -177,7 +177,7 @@ cdef class Row(object):
 
         self._build_name_map()
         if name not in self._name_map:
-            raise AttributeError('Row object has no attribute "%s"' % name)
+            raise AttributeError(f'Row object has no attribute "{name}"')
         return self._data[self._name_map[name]]
 
     def __iter__(self):
@@ -190,7 +190,7 @@ cdef class Row(object):
         if self._description:
             parts = []
             for idx, col in enumerate(self._description):
-                parts.append('%s=%s' % (col[0], repr(self._data[idx])))
+                parts.append(f'{col[0]}={self._data[idx]!r}')
             return '<Row(%s)>' % ', '.join(parts)
         else:
             return '<Row(%s)>' % repr(self._data)
@@ -298,16 +298,16 @@ cdef class Statement(object):
         for i in range(1, pc + 1):
             zbind_name = sqlite3_bind_parameter_name(self.st, i)
             if not zbind_name:
-                raise ProgrammingError('error: binding %s has no name' % i)
+                raise ProgrammingError(f'error: binding {i} has no name')
             bind_name = PyUnicode_FromString(zbind_name + 1)
             if not bind_name:
-                raise ProgrammingError('error: binding %s name could not be '
-                                       'determined' % i)
+                raise ProgrammingError(f'error: binding {i} name could not be '
+                                       'determined')
 
             item = PyDict_GetItem(params, bind_name)
             if item is NULL:
-                raise OperationalError('error: "%s" parameter not found' %
-                                       bind_name)
+                raise OperationalError(f'error: "{bind_name}" parameter not '
+                                       'found')
             out[i - 1] = <object>item
 
         return tuple(out)
@@ -333,7 +333,7 @@ cdef class Statement(object):
             tparams = tuple(params)
 
         if pc != PyTuple_GET_SIZE(tparams):
-            raise OperationalError('error: %s parameters required' % pc)
+            raise OperationalError(f'error: {pc} parameters required')
 
         # Note: sqlite3_bind_XXX uses 1-based indexes.
         for i in range(pc):
@@ -727,7 +727,7 @@ cdef class Cursor(object):
             try:
                 return self.row_factory(self, data)
             except Exception as exc:
-                raise OperationalError('row_factory failed: %s' % exc)
+                raise OperationalError(f'row_factory failed: {exc}')
         return data
 
     cdef finish(self):
@@ -885,7 +885,7 @@ cdef class Connection(_callable_context_manager):
 
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
-            raise InternalError('error closing database: %s' % rc)
+            raise InternalError(f'error closing database: {rc}')
 
         self.db = NULL
         return True
@@ -918,7 +918,7 @@ cdef class Connection(_callable_context_manager):
             errmsg = decode(sqlite3_errmsg(self.db))
             sqlite3_close_v2(self.db)
             self.db = NULL
-            raise OperationalError('error opening database: %s.' % errmsg)
+            raise OperationalError(f'error opening database: {errmsg}.')
 
         if self.extensions:
             rc = sqlite3_enable_load_extension(self.db, 1)
@@ -926,7 +926,7 @@ cdef class Connection(_callable_context_manager):
                 errmsg = decode(sqlite3_errmsg(self.db))
                 sqlite3_close_v2(self.db)
                 self.db = NULL
-                raise InternalError('could not enable extensions: %s' % errmsg)
+                raise InternalError(f'could not enable extensions: {errmsg}')
 
         cdef int timeout_ms = int(self.timeout * 1000)
         rc = sqlite3_busy_timeout(self.db, timeout_ms)
@@ -934,7 +934,7 @@ cdef class Connection(_callable_context_manager):
             errmsg = decode(sqlite3_errmsg(self.db))
             sqlite3_close_v2(self.db)
             self.db = NULL
-            raise OperationalError('error setting busy timeout: %s' % errmsg)
+            raise OperationalError(f'error setting busy timeout: {errmsg}')
 
         return True
 
@@ -1045,7 +1045,7 @@ cdef class Connection(_callable_context_manager):
                     errmsg = NULL
                 else:
                     msg = decode(sqlite3_errmsg(self.db))
-                raise OperationalError('error executing query: %s' % msg)
+                raise OperationalError(f'error executing query: {msg}')
         except Exception:
             raise
         finally:
@@ -1117,8 +1117,8 @@ cdef class Connection(_callable_context_manager):
 
     def pragma(self, key, value=SENTINEL, database=None, multi=False):
         if database is not None:
-            key = '"%s".%s' % (database, key)
-        sql = 'PRAGMA %s' % key
+            key = f'"{database}".{key}'
+        sql = f'PRAGMA {key}'
         if value is not SENTINEL:
             sql += ' = %s' % (value if value is not None else 0)
 
@@ -1133,25 +1133,26 @@ cdef class Connection(_callable_context_manager):
 
     def get_tables(self, database=None):
         database = database or 'main'
-        stmt = self.execute('SELECT name FROM "%s".sqlite_master WHERE '
-                            'type=? ORDER BY name' % database, ('table',))
+        stmt = self.execute(f'SELECT name FROM "{database}".sqlite_master '
+                            'WHERE type=? ORDER BY name', ('table',))
         return [row for row, in stmt]
 
     def get_views(self, database=None):
-        sql = ('SELECT name, sql FROM "%s".sqlite_master WHERE type=? '
-               'ORDER BY name') % (database or 'main')
+        database = database or 'main'
+        sql = (f'SELECT name, sql FROM "{database}".sqlite_master WHERE type=? '
+               'ORDER BY name')
         return [View(*row) for row in self.execute(sql, ('view',))]
 
     def get_indexes(self, table, database=None):
         database = database or 'main'
-        query = ('SELECT name, sql FROM "%s".sqlite_master '
-                 'WHERE tbl_name = ? AND type = ? ORDER BY name') % database
+        query = (f'SELECT name, sql FROM "{database}".sqlite_master '
+                 'WHERE tbl_name = ? AND type = ? ORDER BY name')
         stmt = self.execute(query, (table, 'index'))
         index_to_sql = dict(stmt)
 
         # Determine which indexes have a unique constraint.
         unique_indexes = set()
-        stmt = self.execute('PRAGMA "%s".index_list("%s")' % (database, table))
+        stmt = self.execute(f'PRAGMA "{database}".index_list("{table}")')
         for row in stmt:
             name = row[1]
             is_unique = int(row[2]) == 1
@@ -1161,8 +1162,8 @@ cdef class Connection(_callable_context_manager):
         # Retrieve the indexed columns.
         index_columns = {}
         for index_name in sorted(index_to_sql):
-            stmt = self.execute('PRAGMA "%s".index_info("%s")' %
-                                (database, index_name))
+            stmt = self.execute(
+                f'PRAGMA "{database}".index_info("{index_name}")')
             index_columns[index_name] = [row[2] for row in stmt]
 
         return [
@@ -1175,19 +1176,19 @@ cdef class Connection(_callable_context_manager):
             for name in sorted(index_to_sql)]
 
     def get_columns(self, table, database=None):
-        stmt = self.execute('PRAGMA "%s".table_info("%s")' %
-                            (database or 'main', table))
+        database = database or 'main'
+        stmt = self.execute(f'PRAGMA "{database}".table_info("{table}")')
         return [Column(r[1], r[2], not r[3], bool(r[5]), table, r[4])
                 for r in stmt]
 
     def get_primary_keys(self, table, database=None):
-        stmt = self.execute('PRAGMA "%s".table_info("%s")' %
-                            (database or 'main', table))
+        database = database or 'main'
+        stmt = self.execute(f'PRAGMA "{database}".table_info("{table}")')
         return [row[1] for row in filter(lambda r: r[-1], stmt)]
 
     def get_foreign_keys(self, table, database=None):
-        stmt = self.execute('PRAGMA "%s".foreign_key_list("%s")' %
-                            (database or 'main', table))
+        database = database or 'main'
+        stmt = self.execute(f'PRAGMA "{database}".foreign_key_list("{table}")')
         return [ForeignKey(row[3], row[2], row[4], table) for row in stmt]
 
     def table_column_metadata(self, table, column, database=None):
@@ -1317,7 +1318,7 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             msg = decode(errmsg)
             sqlite3_free(errmsg)
-            raise OperationalError('error loading extension: %s' % msg)
+            raise OperationalError(f'error loading extension: {msg}')
 
     def create_function(self, fn, name=None, nargs=-1, deterministic=True):
         check_connection(self)
@@ -1541,12 +1542,12 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         filename = filename.replace('"', '""')
         name = name.replace('"', '""')
-        self.execute_one('attach database "%s" as "%s"' % (filename, name))
+        self.execute_one(f'attach database "{filename}" as "{name}"')
 
     def detach(self, name):
         check_connection(self)
         name = name.replace('"', '""')
-        self.execute_one('detach database "%s"' % name)
+        self.execute_one(f'detach database "{name}"')
 
     def database_list(self):
         check_connection(self)
@@ -2080,7 +2081,7 @@ cdef class Savepoint(_callable_context_manager):
     def __init__(self, Connection conn, sid=None):
         self.conn = conn
         self.sid = sid or 's' + uuid.uuid4().hex
-        self.quoted_sid = '"%s"' % self.sid
+        self.quoted_sid = f'"{self.sid}"'
 
     def _begin(self):
         self.conn._execute_internal(f'SAVEPOINT {self.quoted_sid}')
@@ -2170,9 +2171,9 @@ cdef class Blob(object):
             &blob)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.conn.db,
-                               'Unable to open blob "%s"."%s" row %s: ' %
-                               (table, column, rowid))
+            raise_sqlite_error(
+                self.conn.db,
+                f'Unable to open blob "{table}"."{column}" row {rowid}: ')
         if blob == NULL:
             raise MemoryError('Unable to allocate blob.')
 
@@ -2585,7 +2586,7 @@ cdef int cyConnect(sqlite3 *db, void *pAux, int argc, const char *const*argv,
         schema = encode('CREATE TABLE x(%s);' %
                         table_func_cls.get_table_columns_declaration())
     except Exception as exc:
-        err = encode('Failed to get schema: %s' % exc)
+        err = encode(f'Failed to get schema: {exc}')
         pzErr[0] = sqlite3_mprintf('%s', err)
         return SQLITE_ERROR
 
@@ -2649,7 +2650,7 @@ cdef int cyOpen(sqlite3_vtab *pBase, sqlite3_vtab_cursor **ppCursor) noexcept wi
     except Exception as exc:
         if table_func_cls.print_tracebacks:
             traceback.print_exc()
-        set_vtab_error(pBase, encode('Table function init failed: %s' % exc))
+        set_vtab_error(pBase, encode(f'Table function init failed: {exc}'))
         sqlite3_free(pCur)
         return SQLITE_ERROR
 
@@ -2949,7 +2950,7 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
     except Exception as exc:
         if table_func_cls.print_tracebacks:
             traceback.print_exc()
-        set_vtab_error(pBase, encode('Update failed: %s' % exc))
+        set_vtab_error(pBase, encode(f'Update failed: {exc}'))
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -3124,7 +3125,7 @@ class TableFunction(object):
 
         if cls.params:
             for param in cls.params:
-                accum.append('%s HIDDEN' % param)
+                accum.append(f'{param} HIDDEN')
 
         return ', '.join(accum)
 
@@ -3155,7 +3156,7 @@ def status(flag):
 
     rc = sqlite3_status(flag, &current, &highwater, 0)
     if rc != SQLITE_OK:
-        raise OperationalError('error requesting status: %s' % rc)
+        raise OperationalError(f'error requesting status: {rc}')
     return (current, highwater)
 
 
@@ -3545,7 +3546,7 @@ cdef class median(object):
             else:
                 hi = mid
         if lo >= self.ct or self.items[lo] != item:
-            assert False, 'item %s not found in window' % item
+            assert False, f'item {item} not found in window'
         del self.items[lo]
         self.ct -= 1
 
