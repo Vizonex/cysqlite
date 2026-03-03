@@ -982,7 +982,7 @@ class TestTransactions(BaseTestCase):
     def setUp(self):
         super(TestTransactions, self).setUp()
         self.create_table()
-        self.db.execute('create table reg (val integer)')
+        self.db.execute('create table reg (val integer not null)')
 
     def assertRegister(self, expected):
         cursor = self.db.execute('select val from reg order by val')
@@ -1138,8 +1138,8 @@ class TestTransactions(BaseTestCase):
         save(1)
         self.assertRegister([1])
 
-    def text_atomic_exception(self):
-        def will_fail(self):
+    def test_atomic_exception(self):
+        def will_fail():
             with self.db.atomic():
                 self._save(1)
                 self._save(None)
@@ -1147,7 +1147,7 @@ class TestTransactions(BaseTestCase):
         self.assertRaises(IntegrityError, will_fail)
         self.assertRegister([])
 
-        def user_error(self):
+        def user_error():
             with self.db.atomic():
                 self._save(2)
                 raise ValueError
@@ -2956,14 +2956,26 @@ class TestStringDistanceUDFs(BaseTestCase):
 
     def test_dlevdist_adjacent_start(self):
         self.assertDLev('ba', 'ab', 1)
+        self.assertDLev('ab', 'ba', 1)
         self.assertDLev('ca', 'ac', 1)
         self.assertDLev('21', '12', 1)
+        self.assertDLev('bac', 'abc', 1)
+        self.assertDLev('abc', 'bac', 1)
+        self.assertDLev('bacd', 'abcd', 1)
+        self.assertDLev('abcd', 'bacd', 1)
 
         # Single-char strings - no transposition possible.
         self.assertDLev('a', 'b', 1)
 
         # Two-char string, no transposition (different chars).
         self.assertDLev('ab', 'cd', 2)
+
+    def test_dlevdist_empty_string(self):
+        self.assertDLev('', '', 0)
+        self.assertDLev('a', '', 1)
+        self.assertDLev('', 'a', 1)
+        self.assertDLev('ab', '', 2)
+        self.assertDLev('', 'ab', 2)
 
 
 class TestMedianUDF(BaseTestCase):
