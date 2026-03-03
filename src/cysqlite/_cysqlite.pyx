@@ -10,7 +10,6 @@ from cpython.buffer cimport PyBUF_CONTIG
 from cpython.buffer cimport PyBUF_CONTIG_RO
 from cpython.buffer cimport PyObject_CheckBuffer
 from cpython.buffer cimport PyObject_GetBuffer
-from cpython.dict cimport PyDict_Check
 from cpython.dict cimport PyDict_GetItem
 from cpython.dict cimport PyDict_Next
 from cpython.float cimport PyFloat_FromDouble
@@ -20,14 +19,12 @@ from cpython.mem cimport PyMem_Malloc
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_DECREF
 from cpython.ref cimport Py_INCREF
-from cpython.tuple cimport PyTuple_Check
 from cpython.tuple cimport PyTuple_New
 from cpython.tuple cimport PyTuple_GET_SIZE
 from cpython.tuple cimport PyTuple_SET_ITEM
 from cpython.unicode cimport PyUnicode_AsUTF8
 from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.unicode cimport PyUnicode_AsUTF8AndSize
-from cpython.unicode cimport PyUnicode_Check
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 from cpython.unicode cimport PyUnicode_FromString
 from libc.float cimport DBL_MAX
@@ -46,6 +43,7 @@ from libc.string cimport memset
 from collections import namedtuple
 from random import randint
 import datetime
+import functools
 import io as _io
 import traceback
 import uuid
@@ -121,6 +119,7 @@ cdef raise_sqlite_error(sqlite3 *db, unicode msg):
 
 cdef class _callable_context_manager(object):
     def __call__(self, fn):
+        @functools.wraps(fn)
         def inner(*args, **kwargs):
             with self:
                 return fn(*args, **kwargs)
@@ -172,8 +171,8 @@ cdef class Row(object):
         return self._data[idx] if idx is not None else default
 
     def __getattr__(self, name):
-        if name.startswith('_'):
-            raise AttributeError('Invalid lookup')
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
 
         self._build_name_map()
         if name not in self._name_map:
@@ -197,13 +196,16 @@ cdef class Row(object):
 
     def __eq__(self, other):
         if isinstance(other, Row):
-            return self._data == other._data
+            return self._data == (<Row>other)._data
         elif isinstance(other, tuple):
             return self._data == other
-        raise NotImplementedError
+        return NotImplemented
 
     def __ne__(self, other):
-        return not self.__eq__(other)
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
 
     def __hash__(self):
         return hash(self._data)
@@ -325,9 +327,9 @@ cdef class Statement(object):
         pc = sqlite3_bind_parameter_count(self.st)
 
         # If params were passed as a dict, convert to a list.
-        if PyTuple_Check(params):
+        if isinstance(params, tuple):
             tparams = <tuple>params
-        elif PyDict_Check(params):
+        elif isinstance(params, dict):
             tparams = self._convert_dict_to_params(params, pc)
         else:
             tparams = tuple(params)
@@ -353,7 +355,7 @@ cdef class Statement(object):
                                          SQLITE_UTF8)
             elif isinstance(param, float):
                 rc = sqlite3_bind_double(self.st, i + 1, param)
-            elif PyBytes_Check(param):
+            elif isinstance(param, bytes):
                 # Faster implementation for bytes vs buffer.
                 buf = PyBytes_AS_STRING(param)
                 rc = sqlite3_bind_blob64(
@@ -645,7 +647,7 @@ cdef class Cursor(object):
             const char *tail
             int rc
 
-        if PyUnicode_Check(sql):
+        if isinstance(sql, str):
             zsql = PyUnicode_AsUTF8(<str>sql)
             if not zsql:
                 raise MemoryError
@@ -980,6 +982,9 @@ cdef class Connection(_callable_context_manager):
         if st.st == NULL:
             raise Exception('Cannot release finalized statement.')
         self.stmt_in_use.pop(id(st), None)
+        #if st.sql in self.stmt_available:
+        #    evicted = <Statement>self.stmt_available.pop(st.sql)
+        #    evicted.finalize()
         self.stmt_available[st.sql] = st
 
         # Remove oldest statement from the cache - relies on Python 3.6
@@ -1046,8 +1051,6 @@ cdef class Connection(_callable_context_manager):
                 else:
                     msg = decode(sqlite3_errmsg(self.db))
                 raise OperationalError(f'error executing query: {msg}')
-        except Exception:
-            raise
         finally:
             if callback is not None:
                 Py_DECREF(ctx)
@@ -2381,7 +2384,7 @@ cdef class Blob(object):
             buffer_acquired = True
             buf = view.buf
             buflen = view.len
-        elif PyUnicode_Check(data):
+        elif isinstance(data, str):
             buf = PyUnicode_AsUTF8AndSize(data, &buflen)
             if buf == NULL:
                 raise ValueError('str could not be encoded as UTF8')
@@ -3479,7 +3482,7 @@ def damerau_levenshtein_dist(s1, s2):
             current_row[j] = min(del_cost, add_cost, sub_cost)
 
             # Handle transpositions.
-            if (i > 0 and j > 1 and s1[i] == s2[j - 1]
+            if (i > 0 and j > 0 and s1[i] == s2[j - 1]
                 and s1[i-1] == s2[j] and s1[i] != s2[j]):
                 current_row[j] = min(current_row[j], two_ago[j - 2] + 1)
 
@@ -3546,7 +3549,7 @@ cdef class median(object):
             else:
                 hi = mid
         if lo >= self.ct or self.items[lo] != item:
-            assert False, f'item {item} not found in window'
+            raise ValueError(f'item {item} not found in median window')
         del self.items[lo]
         self.ct -= 1
 

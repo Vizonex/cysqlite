@@ -32,11 +32,7 @@ cdef inline unicode decode(key):
         finally:
             PyBuffer_Release(&view)
 
-    cdef unicode ukey = str(key)
-    return PyUnicode_DecodeUTF8(
-        PyBytes_AS_STRING(PyUnicode_AsUTF8String(ukey)),
-        PyBytes_GET_SIZE(PyUnicode_AsUTF8String(ukey)),
-        NULL)
+    return str(key)
 
 
 cdef inline bytes encode(key):
@@ -52,7 +48,7 @@ cdef inline bytes encode(key):
     if PyObject_CheckBuffer(key):
         PyObject_GetBuffer(key, &view, PyBUF_SIMPLE)
         try:
-            return PyBytes_AS_STRING((<char*>view.buf))[:view.len]
+            return (<char*>view.buf)[:view.len]
         finally:
             PyBuffer_Release(&view)
 

@@ -963,6 +963,18 @@ class TestRowFactory(BaseTestCase):
         self.assertEqual(curs.fetchone(), tuple(v for k, v in self.r1))
         self.assertRaises(OperationalError, curs.fetchone)
 
+    def test_row_comparison_with_other_types(self):
+        self.db.row_factory = Row
+        curs = self.db.execute('select * from kv order by key limit 1')
+        row = curs.fetchone()
+
+        # Should return False, not raise NotImplementedError.
+        self.assertFalse(row == [1, 'k1', 'v1', 1])
+        self.assertTrue(row != [1, 'k1', 'v1', 1])
+        self.assertFalse(row == 42)
+        self.assertFalse(row == 'hello')
+        self.assertFalse(row == None)
+
 
 class TestTransactions(BaseTestCase):
     filename = ':memory:'
@@ -2941,6 +2953,17 @@ class TestStringDistanceUDFs(BaseTestCase):
         for s1, s2, n in cases:
             self.assertDLev(s1, s2, n)
             self.assertDLev(s2, s1, n)
+
+    def test_dlevdist_adjacent_start(self):
+        self.assertDLev('ba', 'ab', 1)
+        self.assertDLev('ca', 'ac', 1)
+        self.assertDLev('21', '12', 1)
+
+        # Single-char strings - no transposition possible.
+        self.assertDLev('a', 'b', 1)
+
+        # Two-char string, no transposition (different chars).
+        self.assertDLev('ab', 'cd', 2)
 
 
 class TestMedianUDF(BaseTestCase):
