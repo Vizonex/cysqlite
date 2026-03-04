@@ -826,6 +826,12 @@ cdef class Connection(_callable_context_manager):
 
     def __dealloc__(self):
         if self.db:
+            sqlite3_trace_v2(self.db, 0, NULL, NULL)
+            sqlite3_commit_hook(self.db, NULL, NULL)
+            sqlite3_rollback_hook(self.db, NULL, NULL)
+            sqlite3_update_hook(self.db, NULL, NULL)
+            sqlite3_set_authorizer(self.db, NULL, NULL)
+            sqlite3_progress_handler(self.db, 0, NULL, NULL)
             sqlite3_close_v2(self.db)
 
     def finalize_statements(self):
@@ -958,7 +964,7 @@ cdef class Connection(_callable_context_manager):
             try:
                 self.close()
             except Exception as exc:
-                raise exc from exc_val
+                raise exc_val from exc
         else:
             self.close()
         return False
@@ -1568,7 +1574,7 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         cdef:
             int rc, status
-            int iop= int(op)
+            int iop = int(op)
             int isetting = -1 if setting is None else int(setting)
 
         rc = sqlite3_db_config(self.db, iop, isetting, &status)
@@ -1978,7 +1984,7 @@ cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with g
         sid = <long long>p  # Memory address of statement.
         zsql = sqlite3_expanded_sql(<sqlite3_stmt *>p)
         if zsql == NULL:
-            raise MemoryError
+            sql = None
         sql = decode(zsql)
         sqlite3_free(zsql)
 
@@ -2068,7 +2074,10 @@ cdef class Transaction(_callable_context_manager):
             if exc_type:
                 # If there are still more transactions on the stack, then we
                 # will begin a new transaction.
-                self.rollback(not is_bottom)
+                try:
+                    self.rollback(not is_bottom)
+                except Exception as exc:
+                    raise exc_val from exc
             elif is_bottom and not sqlite3_get_autocommit(self.conn.db):
                 try:
                     self.commit(False)
@@ -2105,7 +2114,10 @@ cdef class Savepoint(_callable_context_manager):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type:
-            self.rollback()
+            try:
+                self.rollback()
+            except Exception as exc:
+                raise exc_val from exc
         else:
             try:
                 self.commit(begin=False)
@@ -2368,6 +2380,8 @@ cdef class Blob(object):
         _check_blob(self)
         if self._read_only:
             raise _io.UnsupportedOperation('write')
+        if data is None:
+            raise TypeError('write() does not accept None')
 
         cdef:
             const void *buf = NULL
@@ -3533,6 +3547,9 @@ cdef class median(object):
         self.items = []
 
     def step(self, item):
+        if item is None:
+            return
+
         cdef int lo = 0, hi = self.ct, mid
         while lo < hi:
             mid = (lo + hi) >> 1

@@ -170,7 +170,7 @@ class TestConnection(BaseTestCase):
                 with db.atomic() as txn:
                     raise ValueError('fail')
 
-        with self.assertRaises(OperationalError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             with db:
                 txn = db.transaction()
                 txn.__enter__()  # This will cause close() to fail.
