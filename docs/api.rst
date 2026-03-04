@@ -1302,8 +1302,8 @@ Connection
       vary depending on the operation being traced:
 
       * event: type of event, e.g. ``SQLITE_TRACE_PROFILE``.
-      * sid: memory address of statement (only ``SQLITE_TRACE_CLOSE``), else -1.
-      * sql: expanded SQL string including bound parameters (or ``None`` for ``SQLITE_TRACE_CLOSE``).
+      * sid: memory address of statement (for ``SQLITE_TRACE_CLOSE``, ``sid=-1``).
+      * sql: expanded SQL string including bound parameters (for ``SQLITE_TRACE_CLOSE``, ``sql=None``).
       * ns: estimated number of nanoseconds the statement took to run (only
         ``SQLITE_TRACE_PROFILE``), else -1.
 
