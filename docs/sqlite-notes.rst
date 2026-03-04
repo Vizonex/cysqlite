@@ -84,7 +84,7 @@ column type of the value.
 Converters
 ^^^^^^^^^^
 
-To convert data coming going SQLite to Python, you will need to register one or
+To convert data coming from SQLite to Python, you will need to register one or
 more converters using :meth:`Connection.register_converter` or using the
 :meth:`Connection.converter` decorator. Converters rely on the SQLite
 `sqlite3_column_decltype <https://www.sqlite.org/c3ref/column_decltype.html>`_

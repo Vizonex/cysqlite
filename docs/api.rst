@@ -49,6 +49,18 @@ Module
    :return: (current, highwater)
    :rtype: tuple
 
+   Example:
+
+   .. code-block:: python
+
+      from cysqlite import status, SQLITE_STATUS_MEMORY_USED
+
+      # How much memory has SQLite allocated across all connections?
+      current, highwater = status(SQLITE_STATUS_MEMORY_USED)
+      print(f'SQLite is using {current} bytes (peak: {highwater})')
+
+   .. seealso:: :ref:`sqlite-status-flags`
+
 .. data:: sqlite_version
 
    Version number of the runtime SQLite library as a string.
@@ -358,7 +370,7 @@ Connection
                 id integer not null primary key,
                 name text not null,
                 email text not null);
-             create indexusers_email ON users (email);
+             create index users_email ON users (email);
 
              create table tweets (
                 id integer not null primary key,
@@ -560,6 +572,30 @@ Connection
       :param str lock: type of SQLite lock to acquire, ``DEFERRED`` (default),
          ``IMMEDIATE``, or ``EXCLUSIVE``.
 
+      Example:
+
+      .. code-block:: python
+
+         # Use as a context-manager. Commits on success, rolls back on error.
+         with db.transaction() as txn:
+             db.execute('insert into users (name) values (?)', ('alice',))
+             db.execute('insert into users (name) values (?)', ('bob',))
+
+         # Use as a decorator.
+         @db.transaction()
+         def create_user(name, email):
+             db.execute('insert into users (name, email) values (?, ?)',
+                        (name, email))
+
+         # Acquire an EXCLUSIVE lock immediately to prevent other writers.
+         with db.transaction('EXCLUSIVE') as txn:
+             db.execute('update counters set n = n + 1 where name = ?', ('hits',))
+
+      .. note::
+         Most applications should prefer :meth:`Connection.atomic`, which
+         automatically uses a transaction at the outermost level and
+         savepoints for nested calls.
+
    .. method:: savepoint(sid=None)
 
       Create a context-manager that runs all queries in the wrapped block in
@@ -570,6 +606,26 @@ Connection
       :meth:`~Connection.savepoint` can also be used as a decorator.
 
       :param str sid: savepoint id (optional).
+
+      Example:
+
+      .. code-block:: python
+
+         with db.transaction():
+             db.execute('insert into users (name) values (?)', ('alice',))
+
+             # Nested savepoint - can be rolled back independently.
+             with db.savepoint() as sp:
+                 db.execute('insert into users (name) values (?)', ('bob',))
+                 sp.rollback()  # Only 'bob' is rolled back.
+
+             # 'alice' is still present when the transaction commits.
+
+      .. note::
+
+         Most applications should prefer :meth:`Connection.atomic`, which
+         automatically uses a transaction at the outermost level and
+         savepoints for nested calls.
 
    .. method:: changes()
 
@@ -612,6 +668,22 @@ Connection
       action such as pressing "Cancel" or Ctrl-C where the user wants a long
       query operation to halt immediately.
 
+      Example:
+
+      .. code-block:: python
+
+         import signal
+
+         def on_ctrl_c(signum, frame):
+             db.interrupt()
+
+         signal.signal(signal.SIGINT, on_ctrl_c)
+
+         try:
+             db.execute('select * from big_a, big_b, big_c').fetchall()
+         except OperationalError:
+             print('Query was interrupted.')
+
    .. method:: status(flag)
 
       Read the current and highwater values for the given db status flag.
@@ -631,9 +703,9 @@ Connection
          # Execute a query.
          db.execute('select * from register').fetchall()
 
-         # Get the page cache used.
-         print(db.status(SQLITE_STATUS_PAGECACHE_USED))
-         # (123456, 0)
+         # Get the amount of memory used by cached data (pages, schema, etc).
+         current, highwater = db.status(SQLITE_DBSTATUS_CACHE_USED)
+         print(f'Cache: {current} bytes (peak: {highwater})')
 
    .. method:: pragma(key, value=SENTINEL, database=None, multi=False)
 
@@ -1116,6 +1188,9 @@ Connection
 
           db.commit_hook(on_commit)
 
+          # Clear the commit hook.
+          db.commit_hook(None)
+
    .. method:: rollback_hook(fn)
 
       Register a callback to be executed whenever a transaction is rolled
@@ -1129,9 +1204,13 @@ Connection
 
       .. code-block:: python
 
-          @db.on_rollback
           def on_rollback():
               logger.info('Rolling back changes')
+
+          db.rollback_hook(on_rollback)
+
+          # Clear the rollback hook.
+          db.rollback_hook(None)
 
    .. method:: update_hook(fn)
 
@@ -1185,7 +1264,7 @@ Connection
 
       * :data:`SQLITE_OK`: allow operation.
       * :data:`SQLITE_IGNORE`: allow statement compilation but prevent
-        the operation from occuring.
+        the operation from occurring.
       * :data:`SQLITE_DENY`: prevent statement compilation.
 
       Only a single authorizer can be in place on a database connection at a time.
@@ -1233,6 +1312,25 @@ Connection
 
       Any return value from callback is ignored.
 
+      Example:
+
+      .. code-block:: python
+
+         # Log every statement and how long it took.
+         def log_query(event, sid, sql, ns):
+             if sql is not None:
+                 ms = ns / 1_000_000
+                 print(f'[{ms:.1f}ms] {sql}')
+
+         # SQLITE_TRACE_PROFILE = 2 (the default mask).
+         db.trace(log_query)
+
+         db.execute('select * from users')
+         # [0.1ms] select * from users
+
+         # Remove the trace hook.
+         db.trace(None)
+
    .. method:: progress(fn, n=1)
 
       :param fn: callable or ``None`` to clear the current progress handler.
@@ -1277,6 +1375,22 @@ Connection
       multiple concurrent executions from sleeping and blocking in lock-step.
       Also retries more frequently than the standard implementation.
 
+      This is recommended over the default busy timeout for applications with
+      high write concurrency.
+
+      Example:
+
+      .. code-block:: python
+
+         db = connect('app.db')
+         db.pragma('journal_mode', 'wal')
+
+         # Replace the default busy timeout with the aggressive busy handler.
+         db.set_busy_handler(timeout=10.0)
+
+         # Now concurrent writers will use jittered retries instead of a
+         # simple flat sleep, reducing lock contention.
+
    .. method:: optimize(debug=False, run_tables=True, set_limit=True, check_table_sizes=False, dry_run=False)
 
       :param bool debug: debug-mode, do not actually perform any optimizations,
@@ -1293,6 +1407,21 @@ Connection
       Wrapper around ``PRAGMA optimize``.
 
       See `optimize documentation <https://www.sqlite.org/pragma.html#pragma_optimize>`_.
+
+      Example:
+
+      .. code-block:: python
+
+         db = connect('app.db')
+
+         # Preview what optimizations would be performed.
+         for row in db.optimize(dry_run=True):
+             print(row)
+
+         # Run optimizations (typically called before closing the db).
+         db.optimize()
+
+         db.close()
 
    .. method:: attach(filename, name)
 
@@ -1321,26 +1450,99 @@ Connection
 
    .. method:: database_list()
 
-      :return: ``list`` of all databases active on the connection.
+      :return: ``list`` of ``(name, filename)`` tuples for all databases
+         active on the connection.
+
+      Example:
+
+      .. code-block:: python
+
+         db = connect('app.db')
+
+         print(db.database_list())
+         # [('main', '/path/to/app.db')]
+
+         db.attach('/path/to/logs.db', 'logs')
+         print(db.database_list())
+         # [('main', '/path/to/app.db'), ('logs', '/path/to/logs.db')]
 
    .. method:: set_main_db_name(name)
 
       :param str name: new name for main database.
 
+      Rename the main database schema. After calling this, queries must use
+      the new name when qualifying tables.
+
+      Example:
+
+      .. code-block:: python
+
+         db = connect('app.db')
+         db.set_main_db_name('appdb')
+
+         # The main database is now called 'appdb' instead of 'main'.
+         print(db.database_list())
+         # [('appdb', '/path/to/app.db')]
+
+         # Qualified queries use the new name.
+         db.execute('select * from appdb.users')
+
    .. method:: set_autocheckpoint(n)
 
-      :param int n: set WAL auto-checkpoint.
+      :param int n: number of WAL frames between auto-checkpoints. Set to ``0``
+         to disable automatic checkpointing.
 
-   .. method:: checkpoint(full=False, truncate=False, name=None)
+      Configure the WAL auto-checkpoint interval. After every *n* frames are
+      written to the WAL, a passive checkpoint is run automatically.
 
-      By default will use ``SQLITE_CHECKPOINT_PASSIVE``.
+      Example:
 
-      :param bool full: use ``SQLITE_CHECKPOINT_FULL``
-      :param bool truncate: use ``SQLITE_CHECKPOINT_TRUNCATE``
+      .. code-block:: python
+
+         db = connect('app.db')
+         db.pragma('journal_mode', 'wal')
+
+         # Checkpoint every 500 frames instead of the default 1000.
+         db.set_autocheckpoint(500)
+
+         # Disable auto-checkpointing (manage it manually).
+         db.set_autocheckpoint(0)
+
+   .. method:: checkpoint(full=False, truncate=False, restart=False, name=None)
+
+      Perform a WAL checkpoint. By default will use ``SQLITE_CHECKPOINT_PASSIVE``.
+
+      :param bool full: use ``SQLITE_CHECKPOINT_FULL`` - wait for writers then
+         checkpoint.
+      :param bool truncate: use ``SQLITE_CHECKPOINT_TRUNCATE`` - like restart,
+         but also truncates the WAL file.
+      :param bool restart: use ``SQLITE_CHECKPOINT_RESTART`` - like full, but
+         also waits for readers.
       :param str name: database name to checkpoint, *optional*.
+      :return: a tuple of ``(wal_size, checkpointed_pages)``.
+      :raises: :class:`ValueError` if more than one of ``full``, ``truncate``,
+         or ``restart`` is specified.
 
       See `sqlite3_wal_checkpoint_v2 <https://sqlite.org/c3ref/wal_checkpoint_v2.html>`_
       for details on the parameters and their behavior.
+
+      Example:
+
+      .. code-block:: python
+
+         db = connect('app.db')
+         db.pragma('journal_mode', 'wal')
+
+         # ... perform writes ...
+
+         # Passive checkpoint (does not block readers or writers).
+         wal_size, checkpointed = db.checkpoint()
+
+         # Full checkpoint (waits for writers, then checkpoints all frames).
+         wal_size, checkpointed = db.checkpoint(full=True)
+
+         # Truncate (checkpoint and then truncate the WAL file to zero bytes).
+         db.checkpoint(truncate=True)
 
    .. method:: set_load_extension(enabled)
    .. method:: get_load_extension()
@@ -1354,6 +1556,27 @@ Connection
       reasons, many builds of SQLite do not ship with foreign-key constraints
       enabled by default.
 
+      Example:
+
+      .. code-block:: python
+
+         db = connect(':memory:')
+
+         # Check current state.
+         print(db.get_foreign_keys_enabled())  # 0 (disabled by default)
+
+         # Enable foreign key enforcement.
+         db.set_foreign_keys_enabled(1)
+
+         db.execute('create table parent (id integer primary key)')
+         db.execute('create table child (id integer primary key, '
+                    'pid references parent(id))')
+
+         db.execute('insert into parent (id) values (1)')
+         db.execute('insert into child (id, pid) values (1, 1)')  # OK.
+         db.execute('insert into child (id, pid) values (2, 99)')
+         # IntegrityError: FOREIGN KEY constraint failed.
+
    .. method:: set_triggers_enabled(enabled)
    .. method:: get_triggers_enabled()
 
@@ -1361,10 +1584,24 @@ Connection
 
    .. method:: db_config(op, setting=None)
 
-      :param int op: ``SQLITE_DB_CONFIG_`` constant.
-      :param int setting: New value for setting or ``None``.
+      :param int op: ``SQLITE_DBCONFIG_`` constant.
+      :param int setting: New value for setting or ``None`` to query
+         the current value without changing it.
+      :return: current value of the setting after the call.
+      :rtype: int
 
       Interface to ``sqlite3_db_config()``.
+
+      Example:
+
+      .. code-block:: python
+
+         # Query current state of foreign keys without changing it.
+         current = db.db_config(SQLITE_DBCONFIG_ENABLE_FKEY)
+
+         # Enable defensive mode (prevents direct writes to internal
+         # schema tables).
+         db.db_config(SQLITE_DBCONFIG_DEFENSIVE, 1)
 
    .. method:: setlimit(category, limit)
                getlimit(category)
@@ -1375,13 +1612,38 @@ Connection
       See `sqlite3 run-time limit categories <https://www.sqlite.org/c3ref/c_limit_attached.html#sqlitelimitattached>`_
       for details.
 
+      Example:
+
+      .. code-block:: python
+
+         # Get the current maximum SQL length.
+         max_sql = db.getlimit(SQLITE_LIMIT_SQL_LENGTH)
+         print(f'Max SQL length: {max_sql}')
+
+         # Restrict the maximum number of attached databases to 3.
+         old = db.setlimit(SQLITE_LIMIT_ATTACHED, 3)
+         print(f'Previous limit was: {old}')
+
    .. method:: file_control(op, val, name=None)
 
       :param int op: ``SQLITE_FCNTL_`` constant.
       :param int val: Value for operation.
       :param str name: optional name for database to apply fcntl to.
+      :return: value returned by the file-control operation.
+      :rtype: int
 
       Interface to ``sqlite3_file_control()``.
+
+      Example:
+
+      .. code-block:: python
+
+         # Enable persistent WAL mode (WAL file is not deleted on close).
+         db.file_control(SQLITE_FCNTL_PERSIST_WAL, 1)
+
+         # Get the data version (changes whenever the db is modified).
+         version = db.file_control(SQLITE_FCNTL_DATA_VERSION, 0)
+         print(f'Data version: {version}')
 
 
 Cursor
@@ -1494,7 +1756,7 @@ Cursor
                 id integer not null primary key,
                 name text not null,
                 email text not null);
-             create indexusers_email ON users (email);
+             create index users_email ON users (email);
 
              create table tweets (
                 id integer not null primary key,
@@ -1591,6 +1853,22 @@ Cursor
       Return the count of rows modified by the last operation. Returns ``-1``
       for queries that do not modify data.
 
+   .. method:: __enter__()
+               __exit__(exc_type, exc_val, exc_tb)
+
+      Use a cursor as a context-manager. On exit, the cursor is closed.
+
+      Example:
+
+      .. code-block:: python
+
+         with db.cursor() as curs:
+             curs.execute('select * from users where active = 1')
+             for row in curs:
+                 print(row)
+
+         # Cursor is now closed and the statement cache is released.
+
 Row
 ---
 
@@ -1611,6 +1889,9 @@ Row
 
    .. method:: __len__()
                __eq__()
+               __hash__()
+               __contains__()
+               get(key, default=None)
                keys()
                values()
                items()
@@ -1620,26 +1901,40 @@ Row
 
    .. code-block:: python
 
-      db = cysqlite.connect('app.db')
+      db = cysqlite.connect(':memory:')
       db.row_factory = cysqlite.Row
 
-      curs = db.execute('select * from users')
-      row = curs.fetchone()
+      db.execute('create table users (id integer primary key, '
+                 'username text, active integer)')
+      db.execute('insert into users values (?, ?, ?)', (1, 'charles', 1))
 
+      row = db.execute('select * from users').fetchone()
+
+      # repr shows all columns and values.
       print(row)
       # <Row(id=1, username='charles', active=1)>
 
-      print(row.username)
-      # charles
+      # Access by attribute name, column name, or index.
+      print(row.username)    # 'charles'
+      print(row['active'])   # 1
+      print(row[0])          # 1
 
-      print(row['active'])
-      # 1
+      # Iterate over values.
+      print(list(row))       # [1, 'charles', 1]
 
-      print(row[0])
-      # 1
+      # Dict-like interface.
+      print(row.keys())      # ['id', 'username', 'active']
+      print(row.as_dict())   # {'id': 1, 'username': 'charles', 'active': 1}
 
-      print(list(row))
-      # [1, 'charles', 1]
+      # Test membership and safe access.
+      print('username' in row)        # True
+      print(row.get('email', 'n/a'))  # 'n/a'
+
+      # Rows are usable in sets and as dict keys.
+      seen = set()
+      for row in db.execute('select * from users'):
+          seen.add(row)
+
 
 Blob
 ----
@@ -1672,7 +1967,7 @@ Blob
       rowid = db.last_insert_rowid()
 
       # Now we can open the row for incremental I/O:
-      blob = Blob(db, 'rawdata', 'data', rowid)
+      blob = Blob(db, 'raw_data', 'data', rowid)
 
       # Read from the file and write to the blob in chunks of 4096 bytes.
       while True:
@@ -1740,6 +2035,26 @@ Blob
       the :meth:`~Blob.reopen` method to re-use the same :class:`Blob`
       object for accessing multiple rows in the table.
 
+      Example:
+
+      .. code-block:: python
+
+         db.execute('create table chunks (id integer primary key, data blob)')
+         for i in range(3):
+             db.execute('insert into chunks (data) values (zeroblob(16))')
+
+         blob = db.blob_open('chunks', 'data', 1)
+         blob.write(b'data for row 1!!')
+
+         # Re-use the same handle for a different row.
+         blob.reopen(2)
+         blob.write(b'data for row 2!!')
+
+         blob.reopen(3)
+         blob.write(b'data for row 3!!')
+
+         blob.close()
+
    .. method:: readline(size=-1)
 
       :param int size: Maximum number of bytes to read.
@@ -1754,7 +2069,7 @@ Blob
 
    .. method:: readall()
 
-      Read entire blob.
+      Read entire blob from the current position to the end.
 
    .. method:: readinto(b)
 
@@ -1778,12 +2093,48 @@ Blob
       Allow the blob to be used as a context-manager, closing when the wrapped
       block exits.
 
+      Example:
+
+      .. code-block:: python
+
+         db.execute('insert into raw_data (data) values (zeroblob(?))', (64,))
+         rowid = db.last_insert_rowid()
+
+         with db.blob_open('raw_data', 'data', rowid) as blob:
+             blob.write(b'hello ')
+             blob.write(b'world!')
+
+         # blob is now closed.
+
    .. method:: __getitem__(key)
                __setitem__(key, value)
 
       :param key: an integer index or a ``slice``.
 
-      Read or write to the given index/slice.
+      Read or write to the given index/slice. Indexing returns a single byte
+      as an integer (0-255). Slicing returns ``bytes``.
+
+      Example:
+
+      .. code-block:: python
+
+         blob = db.blob_open('raw_data', 'data', rowid)
+         blob.write(b'ABCDEFGH')
+
+         # Read a single byte (returns an int).
+         print(blob[0])     # 65 (ord('A'))
+
+         # Read a slice (returns bytes).
+         print(blob[0:4])   # b'ABCD'
+
+         # Write a single byte.
+         blob[0] = ord('Z')
+
+         # Write a slice (must be exact same length).
+         blob[4:8] = b'wxyz'
+
+         print(blob[0:8])   # b'ZBCDwxyz'
+         blob.close()
 
 
 TableFunction
@@ -1943,7 +2294,7 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
 
    assert db.last_insert_rowid() == 3
 
-   for row in db.execute('select * from memstore where value != ?' ('v2',)):
+   for row in db.execute('select * from memstore where value != ?', ('v2',)):
        print(row)
 
    # (1, 'k1', 'v1')
@@ -2175,7 +2526,7 @@ may come up when you're using SQLite.
 
       print(db.execute_scalar(
           'select levdist(?, ?)',
-          ('cysqlite', 'cyqslite'))
+          ('cysqlite', 'cyqslite')))
       # 2.
 
 .. function:: damerau_levenshtein_dist(a, b)
@@ -2194,7 +2545,7 @@ may come up when you're using SQLite.
 
       print(db.execute_scalar(
           'select dlevdist(?, ?)',
-          ('cysqlite', 'cyqslite'))
+          ('cysqlite', 'cyqslite')))
       # 1.
 
 .. class:: median()
@@ -2208,15 +2559,18 @@ may come up when you're using SQLite.
 
       db = connect(':memory:')
 
+      db.create_aggregate(median)
       db.create_window_function(median)
 
+      med = db.execute('select median(salary) from employees').scalar()
+
       # Get the employee salaries along w/median salary for their dept.
-      curs = db.execute_scalar("""
+      curs = db.execute("""
           select
             department,
             employee,
             salary,
-            median(salary) over (partition by department) '
+            median(salary) over (partition by department)
           from employees
           order by department""")
 
@@ -2242,7 +2596,7 @@ exception hierarchy.
 .. class:: DatabaseError
 
    Exception raised for errors that are related to the database. The following
-   exception classes are all drived from :class:`DatabaseError`.
+   exception classes are all derived from :class:`DatabaseError`.
 
 .. class:: DataError
 
