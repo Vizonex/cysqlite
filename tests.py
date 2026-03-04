@@ -1,3 +1,4 @@
+import ctypes
 import datetime
 import decimal
 import glob
@@ -7,6 +8,7 @@ import os
 import re
 import sys
 import threading
+import time
 import unittest
 import uuid
 from decimal import Decimal
@@ -60,15 +62,6 @@ VAL_CONVERSION_TESTS = [
 class BaseTestCase(unittest.TestCase):
     filename = '/tmp/cysqlite.db'
 
-    def cleanup(self):
-        if self.filename != ':memory:':
-            for filename in glob.glob(self.filename + '*'):
-                if os.path.isfile(filename):
-                    os.unlink(filename)
-
-    def get_connection(self, **kwargs):
-        return Connection(self.filename, **kwargs)
-
     def setUp(self):
         self.db = self.get_connection()
         self.db.connect()
@@ -77,6 +70,15 @@ class BaseTestCase(unittest.TestCase):
         if not self.db.is_closed():
             self.db.close()
         self.cleanup()
+
+    def cleanup(self):
+        if self.filename != ':memory:':
+            for filename in glob.glob(self.filename.replace('.db', '*')):
+                if os.path.isfile(filename):
+                    os.unlink(filename)
+
+    def get_connection(self, **kwargs):
+        return Connection(self.filename, **kwargs)
 
     def create_table(self):
         self.db.execute('create table "kv" ("id" integer not null primary key,'
@@ -104,7 +106,7 @@ class BaseTestCase(unittest.TestCase):
         self.assertIn(msg, exc.args[0])
 
 
-class TestModule(unittest.TestCase):
+class TestModule(BaseTestCase):
     def test_module_constants(self):
         import cysqlite
         self.assertEqual(cysqlite.apilevel, '2.0')
@@ -117,13 +119,15 @@ class TestModule(unittest.TestCase):
         self.assertEqual(cysqlite.SQLITE_OK, 0)
         self.assertEqual(cysqlite.SQLITE_ERROR, 1)
 
+    def test_compile_option(self):
+        result = compile_option('threadsafe')
+        self.assertIn(result, (0, 1))
 
-class TestOpenConnection(unittest.TestCase):
-    def tearDown(self):
-        for filename in glob.glob('/tmp/cysqlite-*'):
-            if os.path.isfile(filename):
-                os.unlink(filename)
+        result = compile_option('this_option_does_not_exist')
+        self.assertEqual(result, 0)
 
+
+class TestConnection(BaseTestCase):
     def assertDB(self, filename, expected):
         conn = Connection(filename)
         with conn:
@@ -151,6 +155,12 @@ class TestOpenConnection(unittest.TestCase):
 
         with db:
             self.assertFalse(db.is_closed())
+        self.assertTrue(db.is_closed())
+
+        with self.assertRaises(ValueError):
+            with db:
+                self.assertFalse(db.is_closed())
+                raise ValueError('fail')
         self.assertTrue(db.is_closed())
 
     def test_error_closing(self):
@@ -181,6 +191,12 @@ class TestOpenConnection(unittest.TestCase):
         limit2 = db.getlimit(SQLITE_LIMIT_LENGTH)
         self.assertEqual(limit2, limit - 1)
 
+        orig = self.db.setlimit(SQLITE_LIMIT_SQL_LENGTH, 200)
+        self.assertIsInstance(orig, int)
+        current = self.db.getlimit(SQLITE_LIMIT_SQL_LENGTH)
+        self.assertEqual(current, 200)
+        self.db.setlimit(SQLITE_LIMIT_SQL_LENGTH, orig)
+
     def test_db_config(self):
         db = Connection(':memory:')
         db.set_foreign_keys_enabled(True)
@@ -192,6 +208,148 @@ class TestOpenConnection(unittest.TestCase):
         self.assertEqual(db.db_config(SQLITE_DBCONFIG_ENABLE_FKEY, -1), 0)
         self.assertEqual(db.db_config(SQLITE_DBCONFIG_ENABLE_FKEY, 1), 1)
         self.assertTrue(db.get_foreign_keys_enabled())
+
+        self.db.set_triggers_enabled(1)
+        self.assertEqual(self.db.get_triggers_enabled(), 1)
+
+        self.db.set_triggers_enabled(0)
+        self.assertEqual(self.db.get_triggers_enabled(), 0)
+
+    def test_status(self):
+        self.db.execute('create table g (k)')
+        current, _ = self.db.status(SQLITE_DBSTATUS_CACHE_USED)
+        self.assertGreater(current, 0)
+
+        current, _ = self.db.status(SQLITE_DBSTATUS_SCHEMA_USED)
+        self.assertGreater(current, 0)
+
+        current, _ = self.db.status(SQLITE_DBSTATUS_STMT_USED)
+        self.assertGreater(current, 0)
+
+        current, _ = self.db.status(SQLITE_DBSTATUS_LOOKASIDE_USED)
+        self.assertTrue(current >= 0)
+
+        current, _ = status(SQLITE_STATUS_MEMORY_USED)
+        self.assertTrue(current >= 0)
+
+        current, _ = status(SQLITE_STATUS_MALLOC_COUNT)
+        self.assertTrue(current >= 0)
+
+        current, _ = status(SQLITE_STATUS_PAGECACHE_USED)
+        self.assertTrue(current >= 0)
+
+    def test_set_main_db_name(self):
+        self.db.set_main_db_name('app')
+        dbs = self.db.database_list()
+        self.assertEqual(dbs[0][0], 'app')
+
+        self.db.set_main_db_name('main')
+        dbs = self.db.database_list()
+        self.assertEqual(dbs[0][0], 'main')
+
+    def test_file_control(self):
+        result = self.db.file_control(SQLITE_FCNTL_DATA_VERSION, 0)
+        self.assertTrue(result >= 0)
+
+    def test_shared_cache(self):
+        self.assertEqual(self.db.set_shared_cache(1), 1)
+        self.assertEqual(self.db.set_shared_cache(0), 0)
+
+    def test_busy_handler(self):
+        self.create_table()
+        self.create_rows(('k1', 'v1', 1))
+
+        self.db.set_busy_handler(timeout=5.0)
+        self.assertCount(1)
+
+        self.db.set_busy_handler(timeout=1.0)
+        self.assertEqual(self.db.timeout, 1.0)
+
+        self.create_rows(('k2', 'v2', 2))
+        self.assertCount(2)
+
+    @unittest.skipUnless(SLOW_TESTS, 'set SLOW_TESTS=1 to run')
+    def test_busy_handler_contention(self):
+        self.db.pragma('journal_mode', 'wal')
+        self.db.set_busy_handler(timeout=5.0)
+        self.create_table()
+
+        errors = []
+        nthreads = 4
+        nrows = 50
+
+        def writer(n):
+            try:
+                conn = self.get_connection()
+                conn.set_busy_handler(timeout=5.0)
+                for i in range(nrows):
+                    with conn.atomic():
+                        conn.execute('insert into kv (key, value, extra) '
+                                     'values (?, ?, ?)',
+                                     (f't{n}_k{i}', 'v', i))
+                conn.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(n,))
+                   for n in range(nthreads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        self.assertEqual(errors, [], f'Errors during contention: {errors}')
+        count = self.db.execute('select count(*) from kv').scalar()
+        self.assertEqual(count, nthreads * nrows)
+
+    def test_attach_detach(self):
+        path = '/tmp/cysqlite-attach.db'
+        other = Connection(path)
+        other.execute('create table t (x)')
+        other.close()
+
+        self.db.attach(path, 'extra')
+        dbs = self.db.database_list()
+        names = [d[0] for d in dbs]
+        self.assertIn('extra', names)
+
+        self.db.detach('extra')
+        dbs = self.db.database_list()
+        names = [d[0] for d in dbs]
+        self.assertNotIn('extra', names)
+
+        self.db.attach(path, 'ex"tra')
+        dbs = self.db.database_list()
+        names = [d[0] for d in dbs]
+        self.assertIn('ex"tra', names)
+
+        self.db.detach('ex"tra')
+        dbs = self.db.database_list()
+        names = [d[0] for d in dbs]
+        self.assertNotIn('ex"tra', names)
+
+    def test_checkpoint(self):
+        self.db.pragma('journal_mode', 'wal')
+        self.create_table()
+        self.create_rows(('k1', 'v1', 1))
+
+        for kw in ({}, {'full': True}, {'truncate': True}, {'restart': True}):
+            pnlog, pnckpt = self.db.checkpoint(**kw)
+            self.assertTrue(isinstance(pnlog, int))
+            self.assertTrue(isinstance(pnckpt, int))
+
+        self.db.set_autocheckpoint(10)
+        self.create_rows(('k2', 'v2', 2))
+        self.db.set_autocheckpoint(0)
+
+    def test_optimize(self):
+        self.db.execute('create table g(k)')
+        self.db.execute('create index i on g(k)')
+        self.db.executemany('insert into g(k) values (?)',
+                            [(i,) for i in range(100)])
+
+        self.db.optimize(dry_run=True).fetchall()
+        self.db.optimize().fetchall()
 
 
 class TestCheckConnection(BaseTestCase):
@@ -323,6 +481,23 @@ class TestExecute(BaseTestCase):
         self.assertEqual(curs.rowcount, -1)
         self.assertEqual(curs.description, (('1',), ('two',), ('t h.r-e e',)))
 
+    def test_cursor_context_manager(self):
+        self.db.execute('create table g (k, v)')
+        self.db.execute('insert into g (k, v) values (?, ?), (?, ?)',
+                        ('k1', 1, 'k2', 2))
+
+        with self.db.cursor() as curs:
+            curs.execute('select k, v from g order by k')
+            self.assertEqual(curs.fetchall(), [('k1', 1), ('k2', 2)])
+            self.assertEqual(self.db.get_stmt_usage(), (3, 0))
+
+        with self.db.cursor() as curs:
+            curs.execute('select * from g')
+            curs.fetchone()
+            self.assertEqual(self.db.get_stmt_usage(), (3, 1))
+
+        self.assertEqual(self.db.get_stmt_usage(), (4, 0))
+
     def test_execute(self):
         self.db.execute('create table g (k, v)')
         curs = self.db.execute('insert into g (k, v) values '
@@ -383,6 +558,16 @@ class TestExecute(BaseTestCase):
             curs.executemany('insert into g(k, v) values (?, ?) returning k',
                              [('kx', 1)])
 
+    def test_executemany_empty_list(self):
+        self.create_table()
+        curs = self.db.executemany('insert into kv(key, value, extra) '
+                                   'values (?, ?, ?)', [])
+        self.assertCount(0)
+
+        curs = self.db.executemany('insert into kv(key, value, extra) '
+                                   'values (?, ?, ?)', None)
+        self.assertCount(0)
+
     def test_executescript(self):
         self.db.executescript("""
             BEGIN;
@@ -408,6 +593,12 @@ class TestExecute(BaseTestCase):
 
         # Ensure cursor is usable.
         self.assertEqual(cursor.execute('select 1').scalar(), 1)
+
+    def test_execute_script_edge_cases(self):
+        curs = self.db.cursor()
+        curs.executescript('')
+        curs.executescript('   \n  \t  ')
+        curs.executescript(';;;')
 
     def test_execute_invalid_sql(self):
         with self.assertRaises(OperationalError):
@@ -825,7 +1016,7 @@ class TestConverters(BaseTestCase):
         super(TestConverters, self).setUp()
         self.db.execute('create table conv (id integer not null primary key, '
                         'ts datetime, js json, uu uuid, dec numeric(10), '
-                        'data text)')
+                        'ui "unsigned int", data text)')
 
         @self.db.converter('datetime')
         def convert_datetime(value):
@@ -837,10 +1028,13 @@ class TestConverters(BaseTestCase):
 
         self.db.register_converter('Json', json.loads)
         self.db.register_converter('uuid', uuid.UUID)
+        self.db.register_converter(
+            'unsigned',
+            lambda v: ctypes.c_uint16(v).value)
 
-    def _save(self, ts, js, uu, dec, data=None):
-        self.db.execute('insert into conv (ts, js, uu, dec, data) '
-                        'values (?, ?, ?, ?, ?)', (ts, js, uu, dec, data))
+    def _save(self, ts, js, uu, dec, ui, data=None):
+        self.db.execute('insert into conv (ts, js, uu, dec, ui, data) '
+                        'values (?,?,?,?,?,?)', (ts, js, uu, dec, ui, data))
 
     def test_converters(self):
         ts = (datetime.datetime(2026, 1, 2, 3, 4, 5)
@@ -849,27 +1043,28 @@ class TestConverters(BaseTestCase):
         uu = uuid.uuid4()
         dec = decimal.Decimal('1.3')
 
-        self._save(ts, json.dumps(js), uu, dec, 'abc')
+        self._save(ts, json.dumps(js), uu, dec, -1, 'abc')
 
         row = self.db.execute_one('select * from conv')
-        self.assertEqual(row, (1, ts, js, uu, dec, 'abc'))
+        self.assertEqual(row, (1, ts, js, uu, dec, 65535, 'abc'))
 
         self.db.unregister_converter('numeric')
         row = self.db.execute_one('select * from conv')
-        self.assertEqual(row, (1, ts, js, uu, 1.3, 'abc'))
+        self.assertEqual(row, (1, ts, js, uu, 1.3, 65535, 'abc'))
 
     def test_converters_nulls(self):
-        self._save(None, None, None, None, None)
+        self._save(None, None, None, None, None, None)
         row = self.db.execute_one('select * from conv')
-        self.assertEqual(row, (1, None, None, None, None, None))
+        self.assertEqual(row, (1, None, None, None, None, None, None))
 
     def test_converter_error(self):
-        self._save(None, None, None, None, None)
-        self._save(None, 'bad json', None, None, None)
-        self._save(None, '{}', None, None, None)
+        self._save(None, None, None, None, None, None)
+        self._save(None, 'bad json', None, None, None, None)
+        self._save(None, '{}', None, None, None, None)
 
         curs = self.db.execute('select * from conv')
-        self.assertEqual(curs.fetchone(), (1, None, None, None, None, None))
+        self.assertEqual(curs.fetchone(),
+                         (1, None, None, None, None, None, None))
 
         with self.assertRaises(ValueError) as exc:
             curs.fetchone()
@@ -877,7 +1072,8 @@ class TestConverters(BaseTestCase):
         self.assertIn('Expecting value', str(exc.exception))
 
         # Cursor is still operable.
-        self.assertEqual(curs.fetchone(), (3, None, {}, None, None, None))
+        self.assertEqual(curs.fetchone(),
+                         (3, None, {}, None, None, None, None))
         self.assertTrue(curs.fetchone() is None)
 
 
@@ -914,10 +1110,28 @@ class TestRowFactory(BaseTestCase):
         self.assertEqual(r1.key, 'k1')
         self.assertEqual(r1[1], 'k1')
         self.assertEqual(r1['key'], 'k1')
+        self.assertEqual(r1.get('key'), 'k1')
 
         self.assertRaises(AttributeError, lambda: r1.x)
         self.assertRaises(KeyError, lambda: r1['x'])
         self.assertRaises(TypeError, lambda: r1[None])
+        self.assertTrue(r1.get('x') is None)
+        self.assertEqual(r1.get('x', 1), 1)
+
+        self.assertTrue('key' in r1)
+        self.assertFalse('x' in r1)
+
+        d = {r1: 'r1'}
+        self.assertTrue(r1 in d)
+        self.assertFalse(r2 in d)
+
+    def test_duplicate_name(self):
+        self.db.row_factory = Row
+        row = self.db.execute('select 1 as a, 2 as a, 3 as a').fetchone()
+        self.assertEqual(row.a, 1)
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], 2)
+        self.assertEqual(row[2], 3)
 
     def test_custom_factory(self):
         def dict_factory(cursor, row):
@@ -1413,6 +1627,25 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.assertRaises(OperationalError, lambda: run(1))
         self.assertRaises(OperationalError, lambda: run(1, 2, 3))
 
+    def test_create_function_return_types(self):
+        def value_type(i):
+            return VAL_TESTS[i]
+
+        self.db.create_function(value_type)
+
+        for i in range(len(VAL_TESTS)):
+            val = self.db.execute('select value_type(?)', (i,)).scalar()
+            self.assertEqual(val, VAL_TESTS[i])
+
+        def value_conv(i):
+            return VAL_CONVERSION_TESTS[i][0]
+
+        self.db.create_function(value_conv)
+
+        for i in range(len(VAL_CONVERSION_TESTS)):
+            val = self.db.execute('select value_conv(?)', (i,)).scalar()
+            self.assertEqual(val, VAL_CONVERSION_TESTS[i][1])
+
     def test_create_aggregate(self):
         class Sum(object):
             def __init__(self): self.value = 0
@@ -1422,6 +1655,30 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.db.create_aggregate(Sum, 'mysum', 1)
         curs = self.db.execute('select mysum(extra) from kv')
         self.assertEqual(curs.scalar(), 60)
+
+    def test_create_aggregate_return_types(self):
+        self.db.print_callback_tracebacks = True
+        class ValueType(object):
+            def __init__(self): self.idx = 0
+            def step(self, value): self.idx = value
+            def finalize(self): return VAL_TESTS[self.idx]
+
+        self.db.create_aggregate(ValueType)
+
+        for i in range(len(VAL_TESTS)):
+            curs = self.db.execute('select valuetype(?)', (i,))
+            self.assertEqual(curs.scalar(), VAL_TESTS[i])
+
+        class ValueConv(object):
+            def __init__(self): self.idx = 0
+            def step(self, value): self.idx = value
+            def finalize(self): return VAL_CONVERSION_TESTS[self.idx][0]
+
+        self.db.create_aggregate(ValueConv)
+
+        for i in range(len(VAL_CONVERSION_TESTS)):
+            curs = self.db.execute('select valueconv(?)', (i,))
+            self.assertEqual(curs.scalar(), VAL_CONVERSION_TESTS[i][1])
 
     def test_aggregate_broken_init(self):
         class BrokenInit(object):
@@ -1937,10 +2194,19 @@ class TestDatabaseSettings(BaseTestCase):
 class TestBackup(BaseTestCase):
     filename = ':memory:'
 
-    def test_backup(self):
+    def setUp(self):
+        super(TestBackup, self).setUp()
+
         self.db.execute('create table g (k, v)')
         self.db.executemany('insert into g (k, v) values (?, ?)',
                             [('k%02d' % i, 'v%02d' % i) for i in range(100)])
+
+    def tearDown(self):
+        super(TestBackup, self).tearDown()
+        for f in glob.glob('/tmp/cysqlite_backup.db*'):
+            os.unlink(f)
+
+    def test_backup(self):
         curs = self.db.cursor()
         self.assertEqual(curs.execute('select count(*) from g').scalar(), 100)
 
@@ -1950,6 +2216,37 @@ class TestBackup(BaseTestCase):
         new.connect()
         self.db.backup(new)
         self.assertEqual(new.execute('select count(*) from g').scalar(), 100)
+
+    def test_backup_to_file(self):
+        self.db.backup_to_file('/tmp/cysqlite_backup.db')
+        with Connection('/tmp/cysqlite_backup.db') as dest:
+            self.assertEqual(dest.execute('select count(*) from g').scalar(),
+                             100)
+
+    def test_backup_progress(self):
+        accum = []
+
+        def progress_cb(remaining, page_count, is_done):
+            accum.append((remaining, page_count, is_done))
+
+        with Connection(':memory:') as dest:
+            self.db.backup(dest, pages=1, progress=progress_cb)
+
+        self.assertTrue(len(accum) > 0)
+        self.assertTrue(accum[-1][2])
+        for remaining, page_count, is_done in accum:
+            self.assertGreaterEqual(page_count, 0)
+            self.assertGreaterEqual(remaining, 0)
+
+    def test_backup_progress_exception(self):
+        def broken_progress(remaining, page_count, is_done):
+            raise ValueError('fail')
+
+        with Connection(':memory:') as dest:
+            with self.assertRaises(ValueError) as ctx:
+                self.db.backup(dest, pages=1, progress=broken_progress)
+
+        self.assertIn('fail', str(ctx.exception))
 
 
 class TestStatementUsage(BaseTestCase):
@@ -2151,6 +2448,25 @@ class TestBlob(BaseTestCase):
         data = blob.read(16)
         self.assertEqual(data, b'zzzxyyyyyyyyyyyy')
 
+        # Strings are utf8-encoded automatically.
+        blob.seek(0)
+        blob.write('abcd\u2022')
+        blob.seek(0)
+        self.assertEqual(blob.read(8), b'abcd\xe2\x80\xa2y')
+
+    def test_blob_readall(self):
+        rowid = self.create_blob_row(8)
+        blob = Blob(self.db, 'register', 'data', rowid)
+        blob.write(b'abcdefg')
+        blob.seek(0)
+        self.assertEqual(blob.readall(), b'abcdefg\x00')
+        self.assertEqual(blob.tell(), 8)
+
+        blob.seek(4)
+        self.assertEqual(blob.readall(), b'efg\x00')
+
+        blob.close()
+
     def test_blob_iobase_methods(self):
         rowid64 = self.create_blob_row(64)
         blob = Blob(self.db, 'register', 'data', rowid64)
@@ -2226,6 +2542,11 @@ class TestBlob(BaseTestCase):
         self.assertEqual(blob[-1], 0xff)
         self.assertEqual(blob[-2], 0xfe)
         self.assertEqual(blob[-16], 1)
+        blob.close()
+
+        blob = Blob(self.db, 'register', 'data', rowid, read_only=True)
+        with self.assertRaises(io.UnsupportedOperation):
+            blob[0] = 0xff
 
     def test_blob_item_slice(self):
         rowid = self.create_blob_row(16)
@@ -2259,6 +2580,11 @@ class TestBlob(BaseTestCase):
         blob[0:4] = b'\xff\xfe\xfd\xfc'
         self.assertEqual(blob[0:4], b'\xff\xfe\xfd\xfc')
         self.assertEqual(blob[4:8], b'\x04\x05\x06\x07')
+        blob.close()
+
+        blob = Blob(self.db, 'register', 'data', rowid, read_only=True)
+        with self.assertRaises(io.UnsupportedOperation):
+            blob[0:2] = b'\xff\xfe'
 
     def test_blob_exceed_size(self):
         rowid = self.create_blob_row(16)
