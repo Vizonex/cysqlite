@@ -1303,11 +1303,11 @@ Connection
 
       * event: type of event, e.g. ``SQLITE_TRACE_PROFILE``.
       * sid: memory address of statement (only ``SQLITE_TRACE_CLOSE``), else -1.
-      * sql: SQL string (only ``SQLITE_TRACE_STMT``), else None.
+      * sql: expanded SQL string including bound parameters (or ``None`` for ``SQLITE_TRACE_CLOSE``).
       * ns: estimated number of nanoseconds the statement took to run (only
         ``SQLITE_TRACE_PROFILE``), else -1.
 
-      See `sqlite_trace_v2 <https://sqlite.org/c3ref/c_trace.html>`_ for
+      See `sqlite3_trace_v2 <https://sqlite.org/c3ref/c_trace.html>`_ for
       more details on trace modes and parameters.
 
       Any return value from callback is ignored.
@@ -1318,7 +1318,7 @@ Connection
 
          # Log every statement and how long it took.
          def log_query(event, sid, sql, ns):
-             if sql is not None:
+             if event == SQLITE_TRACE_PROFILE:
                  ms = ns / 1_000_000
                  print(f'[{ms:.1f}ms] {sql}')
 

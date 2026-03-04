@@ -982,19 +982,19 @@ cdef class Connection(_callable_context_manager):
         if st.st == NULL:
             raise Exception('Cannot release finalized statement.')
         self.stmt_in_use.pop(id(st), None)
+        # We could evict, finalize and replace here, but since the evicted stmt
+        # will be garbage-collected automatically it isn't strictly necessary.
         #if st.sql in self.stmt_available:
         #    evicted = <Statement>self.stmt_available.pop(st.sql)
         #    evicted.finalize()
         self.stmt_available[st.sql] = st
 
-        # Remove oldest statement from the cache - relies on Python 3.6
-        # dictionary retaining insertion order. For older python, will simply
-        # remove a random key, which is also fine.
         cdef:
             PyObject *key
             PyObject *value
             Py_ssize_t pos = 0
 
+        # Remove oldest statement from the cache.
         if len(self.stmt_available) > self.cached_statements:
             if PyDict_Next(self.stmt_available, &pos, &key, &value):
                 evicted = <Statement>self.stmt_available.pop(<object>key)
@@ -1959,7 +1959,7 @@ cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
 cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with gil:
     cdef:
         _Callback cb = <_Callback>data
-        bytes bsql
+        char *zsql
         long long sid = -1
         int64_t ns = -1
         unicode sql = None
@@ -1976,10 +1976,13 @@ cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with g
     # pointer to the db conn, X is unused.
     if event != SQLITE_TRACE_CLOSE:
         sid = <long long>p  # Memory address of statement.
-    if event == SQLITE_TRACE_STMT:
-        bsql = <bytes>(<char *>x)
-        sql = decode(bsql)
-    elif event == SQLITE_TRACE_PROFILE:
+        zsql = sqlite3_expanded_sql(<sqlite3_stmt *>p)
+        if zsql == NULL:
+            raise MemoryError
+        sql = decode(zsql)
+        sqlite3_free(zsql)
+
+    if event == SQLITE_TRACE_PROFILE:
         ns = (<int64_t *>x)[0]
 
     try:

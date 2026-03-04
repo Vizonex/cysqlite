@@ -1999,7 +1999,10 @@ class TestUserDefinedCallbacks(BaseTestCase):
 
         self.assertEqual(accum, [
             (1, 'select key from kv order by key'),
-            (4, None), (4, None), (4, None)])
+            (4, 'select key from kv order by key'),
+            (4, 'select key from kv order by key'),
+            (4, 'select key from kv order by key'),
+        ])
 
     def test_broken_tracer(self):
         def broken(code, sid, sql, ns):
