@@ -2130,7 +2130,7 @@ cdef class Atomic(_callable_context_manager):
     cdef:
         Connection conn
         str lock
-        object txn
+        readonly object txn
 
     def __init__(self, Connection conn, lock=None):
         self.conn = conn

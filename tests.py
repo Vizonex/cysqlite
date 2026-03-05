@@ -1,3 +1,4 @@
+import asyncio
 import ctypes
 import datetime
 import decimal
@@ -3373,6 +3374,129 @@ class TestMedianUDF(BaseTestCase):
             ('k3', 4, 4),   ('k3', 4, 4),   ('k3', 8, 4),   ('k3', 2, 4),
             ('k3', 2, 4),   ('k3', 8, 4),   ('k3', 1, 4),
             ('k4', 1, 10),  ('k4', 10000, 10), ('k4', 10, 10)])
+
+
+from cysqlite.aio import connect
+
+
+class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.db = connect(':memory:')
+
+    async def asyncTearDown(self):
+        await self.db.close()
+        self.db.join()
+
+    async def test_execute(self):
+        curs = await self.db.execute('select 1')
+        self.assertEqual(await curs.fetchall(), [(1,)])
+
+        curs = await self.db.execute('select 2')
+        self.assertEqual(await curs.fetchone(), (2,))
+
+        curs = await self.db.execute('select 3 where 0 = 1')
+        self.assertEqual(await curs.fetchall(), [])
+
+        curs = await self.db.execute('select 3 where 0 = 1')
+        self.assertIsNone(await curs.fetchone())
+
+        self.assertEqual(await self.db.execute_one('select 1'), (1,))
+        self.assertIsNone(await self.db.execute_one('select 1 where 0=1'))
+        self.assertEqual(await self.db.execute_scalar('select 1'), 1)
+        self.assertIsNone(await self.db.execute_scalar('select 1 where 0=1'))
+
+    async def test_execute_table(self):
+        await self.db.execute('create table t(k, v)')
+
+        curs = await self.db.execute('select * from t')
+        self.assertEqual(await curs.fetchall(), [])
+        self.assertEqual(await curs.fetchmany(10), [])
+        self.assertIsNone(await curs.fetchone())
+
+        rows = [(f'k{i:03d}', f'v{i:03d}') for i in range(101)]
+        await self.db.executemany('insert into t (k, v) values (?, ?)', rows)
+
+        curs = await self.db.execute('select * from t order by k')
+        self.assertEqual(await curs.fetchall(), rows)
+        self.assertEqual(await curs.fetchall(), [])
+        self.assertIsNone(await curs.fetchone())
+
+        curs = await self.db.execute('select * from t order by k')
+        self.assertEqual(await curs.fetchone(), rows[0])
+        self.assertEqual(await curs.fetchmany(10), rows[1:11])
+        self.assertEqual(await curs.fetchmany(10), rows[11:21])
+        self.assertEqual(await curs.fetchone(), rows[21])
+        self.assertEqual(await curs.fetchall(), rows[22:])
+        self.assertIsNone(await curs.fetchone())
+        self.assertEqual(await curs.fetchall(), [])
+        self.assertEqual(await curs.fetchmany(10), [])
+
+    async def test_execute_helpers(self):
+        await self.db.executescript('begin; create table t(k, v); commit;')
+        await self.db.executemany('insert into t(k, v) values (?, ?)',
+                                  [('k0', 'v0'), ('k1', 'v1')])
+        self.assertEqual(await self.db.last_insert_rowid(), 2)
+        self.assertEqual(
+            await self.db.execute_scalar('select count(*) from t'), 2)
+
+        row = await self.db.execute_one('select * from t order by k')
+        self.assertEqual(row, ('k0', 'v0'))
+
+    async def test_execute_errors(self):
+        with self.assertRaises(OperationalError):
+            await self.db.execute('invalid sql')
+
+        with self.assertRaises(OperationalError):
+            await self.db.executemany('invalid sql', [()])
+
+        with self.assertRaises(OperationalError):
+            await self.db.executescript('select 1; invalid sql;')
+
+    async def insert(self, k, v=None):
+        await self.db.execute('insert into t (k, v) values (?, ?)', (k, v))
+
+    async def assertT(self, expected):
+        curs = await self.db.execute('select k from t order by k')
+        ks = [k for k, in await curs.fetchall()]
+        self.assertEqual(ks, expected)
+
+    async def test_atomic(self):
+        await self.db.execute('create table t(k, v)')
+        self.assertFalse(self.db.in_transaction)
+
+        async with self.db.atomic() as tx:
+            await self.insert(1)
+            self.assertTrue(self.db.in_transaction)
+            await tx.commit()
+            self.assertTrue(self.db.in_transaction)
+            await self.insert(2)
+            await tx.rollback()
+            self.assertTrue(self.db.in_transaction)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1])
+
+        async with self.db.atomic() as tx:
+            await self.insert(2)
+            async with self.db.atomic() as sp:
+                await self.insert(3)
+                async with self.db.atomic() as sp2:
+                    await self.insert(4)
+                    await sp2.rollback()
+                    await self.insert(5)
+                await self.assertT([1, 2, 3, 5])
+                await sp.rollback()
+                await self.assertT([1, 2])
+                await self.insert(6)
+
+            await self.assertT([1, 2, 6])
+            await self.insert(7)
+            await tx.commit()
+            await self.insert(8)
+            await tx.rollback()
+            await self.insert(9)
+
+        await self.assertT([1, 2, 6, 7, 9])
 
 
 if __name__ == '__main__':
