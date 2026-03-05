@@ -3498,6 +3498,33 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
 
         await self.assertT([1, 2, 6, 7, 9])
 
+    async def test_atomic_exceptions(self):
+        await self.db.execute('create table t(k, v)')
+        await self.db.execute('create unique index t_k on t(k)')
+        self.assertFalse(self.db.in_transaction)
+
+        with self.assertRaises(IntegrityError):
+            async with self.db.atomic() as tx:
+                await self.insert(1)
+                await self.insert(1)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([])
+
+        async with self.db.atomic() as tx:
+            await self.insert(2)
+            async with self.db.atomic() as sp:
+                await self.insert(3)
+                with self.assertRaises(IntegrityError):
+                    async with self.db.atomic() as sp2:
+                        await self.insert(4)
+                        await self.insert(4)
+                await self.assertT([2, 3])
+
+            await self.assertT([2, 3])
+
+        await self.assertT([2, 3])
+
 
 if __name__ == '__main__':
     unittest.main(argv=sys.argv)
