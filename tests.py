@@ -3385,7 +3385,6 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.db.close()
-        self.db.join()
 
     async def test_execute(self):
         curs = await self.db.execute('select 1')

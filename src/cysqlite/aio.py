@@ -19,6 +19,11 @@ class AsyncConnection(object):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def __del__(self):
+        if self._thread.is_alive():
+            self.queue.put((self._conn.close, None))
+            self.queue.put(SHUTDOWN)
+
     def _run(self):
         while True:
             item = self.queue.get()
@@ -28,34 +33,48 @@ class AsyncConnection(object):
             try:
                 result = fn()
             except BaseException as exc:
-                self.loop.call_soon_threadsafe(fut.set_exception, exc)
+                if fut is not None:
+                    self.loop.call_soon_threadsafe(fut.set_exception, exc)
             else:
-                self.loop.call_soon_threadsafe(fut.set_result, result)
+                if fut is not None:
+                    self.loop.call_soon_threadsafe(fut.set_result, result)
 
-    def _submit(self, fn):
+    def _submit(self, fn, *args, **kwargs):
         fut = self.loop.create_future()
-        self.queue.put((fn, fut))
+        def wrap():
+            if not fut.cancelled():
+                return fn(*args, **kwargs)
+        self.queue.put((wrap, fut))
         return fut
 
     async def execute(self, sql, params=None):
-        cursor = await self._submit(partial(self.conn.execute, sql, params))
+        fut = self.loop.create_future()
+        def wrap():
+            if not fut.cancelled():
+                return self.conn.execute(sql, params)
+
+        self.queue.put((wrap, fut))
+        try:
+            cursor = await fut
+        except asyncio.CancelledError:
+            self.conn.interrupt()
+            raise
+
         return AsyncCursor(self, cursor)
 
     async def executemany(self, sql, seq_of_params):
-        cursor = await self._submit(partial(self.conn.executemany, sql,
-                                            seq_of_params))
+        cursor = await self._submit(self.conn.executemany, sql, seq_of_params)
         return AsyncCursor(self, cursor)
 
     async def executescript(self, sql):
-        cursor = await self._submit(partial(self.conn.executescript, sql))
+        cursor = await self._submit(self.conn.executescript, sql)
         return AsyncCursor(self, cursor)
 
     async def execute_one(self, sql, params=None):
-        return await self._submit(partial(self.conn.execute_one, sql, params))
+        return await self._submit(self.conn.execute_one, sql, params)
 
     async def execute_scalar(self, sql, params=None):
-        return await self._submit(partial(self.conn.execute_scalar, sql,
-                                          params))
+        return await self._submit(self.conn.execute_scalar, sql, params)
 
     async def commit(self):
         await self._submit(self.conn.commit)
@@ -64,25 +83,25 @@ class AsyncConnection(object):
         await self._submit(self.conn.rollback)
 
     async def close(self):
-        await self._submit(self.conn.close)
-        self.queue.put(SHUTDOWN)
-        # Join from the event loop?
+        try:
+            await self._submit(self.conn.close)
+        finally:
+            self.queue.put(SHUTDOWN)
+            await self.loop.run_in_executor(None, self._thread.join, 5.0)
+            if self._thread.is_alive():
+                raise RuntimeError('Could not shut down database thread.')
 
     async def last_insert_rowid(self):
         return await self._submit(self.conn.last_insert_rowid)
 
-    def join(self, timeout=None):
-        self._thread.join(timeout)
-
     async def backup(self, dest, **kwargs):
-        await self._submit(partial(self.conn.backup, dest.conn, **kwargs))
+        await self._submit(self.conn.backup, dest.conn, **kwargs)
 
     async def backup_to_file(self, filename, **kwargs):
-        await self._submit(partial(self.conn.backup_to_file, filename,
-                                   **kwargs))
+        await self._submit(self.conn.backup_to_file, filename, **kwargs)
 
     async def checkpoint(self, **kwargs):
-        return await self._submit(partial(self.conn.checkpoint, **kwargs))
+        return await self._submit(self.conn.checkpoint, **kwargs)
 
     def transaction(self, lock=None):
         return AsyncTransaction(self, lock)
@@ -98,7 +117,7 @@ class AsyncConnection(object):
         return self.conn.in_transaction
 
     def pragma(self, *args, **kwargs):
-        return self._submit(partial(self.conn.pragma, *args, **kwargs))
+        return self._submit(self.conn.pragma, *args, **kwargs)
 
     async def __aenter__(self):
         return self
