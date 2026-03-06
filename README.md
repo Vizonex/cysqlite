@@ -21,6 +21,7 @@ cysqlite supports standalone builds or dynamic-linking with the system SQLite.
 * BLOB support
 * Row objects with dict-like access
 * Schema introspection utilities
+* Asyncio support
 
 ### Installing
 
