@@ -144,6 +144,20 @@ class TestConnection(BaseTestCase):
         self.assertDB('file:///tmp/cysqlite-test.db?mode=ro&cache=private',
                       '/tmp/cysqlite-test.db')
 
+    def test_connect(self):
+        db = connect(':memory:')
+        self.assertIsInstance(db, Connection)
+        db.close()
+
+        db = connect(':memory:', row_factory=Row, timeout=10.0)
+        self.assertEqual(db.row_factory, Row)
+        self.assertEqual(db.timeout, 10.0)
+        db.close()
+
+        db = connect(':memory:', pragmas={'cache_size': -1000})
+        self.assertEqual(db.pragma('cache_size'), -1000)
+        db.close()
+
     def test_open_close(self):
         db = Connection(':memory:', autoconnect=False)
         self.assertTrue(db.is_closed())
@@ -2085,6 +2099,26 @@ class TestDatabaseSettings(BaseTestCase):
         for filename in glob.glob('/tmp/cysqlite.db*'):
             os.unlink(filename)
 
+    def test_pragma(self):
+        result = self.db.pragma('journal_mode')
+        self.assertEqual(result, 'memory')
+
+        self.db.pragma('cache_size', -123)
+        self.assertEqual(self.db.pragma('cache_size'), -123)
+        self.db.close()
+
+        self.db.connect()
+        self.assertNotEqual(self.db.pragma('cache_size'), -123)
+        self.db.close()
+
+        self.db.connect()
+        self.db.pragma('cache_size', -234, permanent=True)
+        self.assertEqual(self.db.pragma('cache_size'), -234)
+        self.db.close()
+
+        self.db.connect()
+        self.assertEqual(self.db.pragma('cache_size'), -234)
+
     def test_pragmas_settings(self):
         self.db.execute('pragma foreign_keys = 1')
         self.assertEqual(self.db.get_foreign_keys_enabled(), 1)
@@ -3376,15 +3410,70 @@ class TestMedianUDF(BaseTestCase):
             ('k4', 1, 10),  ('k4', 10000, 10), ('k4', 10, 10)])
 
 
-from cysqlite.aio import connect
+from cysqlite.aio import connect as aconnect
 
 
 class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.db = connect(':memory:')
+        self.db = aconnect(':memory:')
 
     async def asyncTearDown(self):
         await self.db.close()
+
+    async def create_data(self, nrows):
+        await self.db.execute('create table if not exists t(k, v)')
+        rows = [(f'k{i:03d}', f'v{i:03d}') for i in range(nrows)]
+        await self.db.executemany('insert into t (k, v) values (?, ?)', rows)
+        return rows
+
+    async def insert(self, k, v=None):
+        await self.db.execute('insert into t (k, v) values (?, ?)', (k, v))
+
+    async def assertT(self, expected):
+        curs = await self.db.execute('select k from t order by k')
+        ks = [k for k, in await curs.fetchall()]
+        self.assertEqual(ks, expected)
+
+    async def test_connect(self):
+        db = aconnect(':memory:')
+        self.assertIsInstance(db.conn, Connection)
+        self.assertTrue(db._thread.is_alive())
+        await db.close()
+
+        db = aconnect(':memory:', row_factory=Row, timeout=10.0)
+        self.assertEqual(db.conn.row_factory, Row)
+        self.assertEqual(db.conn.timeout, 10.0)
+        await db.close()
+
+        db = aconnect(':memory:', pragmas={'cache_size': -1000})
+        self.assertEqual(await db.pragma('cache_size'), -1000)
+        await db.close()
+
+    async def test_connect_context(self):
+        async with aconnect(':memory:') as db:
+            await db.execute('select 1')
+            self.assertFalse(db.conn.is_closed())
+        self.assertTrue(db.conn.is_closed())
+
+        with self.assertRaises(ValueError):
+            async with aconnect(':memory:') as db:
+                await db.execute('select 1')
+                self.assertFalse(db.conn.is_closed())
+                raise ValueError
+        self.assertTrue(db.conn.is_closed())
+
+    async def test_close_thread_shutdown(self):
+        db = aconnect(':memory:')
+        self.assertTrue(db._thread.is_alive())
+        await db.close()
+        db._thread.join(timeout=2.0)
+        self.assertFalse(db._thread.is_alive())
+
+    async def test_double_close(self):
+        db = aconnect(':memory:')
+        await db.close()
+        await asyncio.wait_for(db.close(), timeout=1.0)
+        self.assertFalse(await db.close())
 
     async def test_execute(self):
         curs = await self.db.execute('select 1')
@@ -3405,15 +3494,14 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.db.execute_scalar('select 1 where 0=1'))
 
     async def test_execute_table(self):
-        await self.db.execute('create table t(k, v)')
+        await self.create_data(0)
 
         curs = await self.db.execute('select * from t')
         self.assertEqual(await curs.fetchall(), [])
         self.assertEqual(await curs.fetchmany(10), [])
         self.assertIsNone(await curs.fetchone())
 
-        rows = [(f'k{i:03d}', f'v{i:03d}') for i in range(101)]
-        await self.db.executemany('insert into t (k, v) values (?, ?)', rows)
+        rows = await self.create_data(101)
 
         curs = await self.db.execute('select * from t order by k')
         self.assertEqual(await curs.fetchall(), rows)
@@ -3451,16 +3539,141 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OperationalError):
             await self.db.executescript('select 1; invalid sql;')
 
-    async def insert(self, k, v=None):
-        await self.db.execute('insert into t (k, v) values (?, ?)', (k, v))
+    async def test_iteration(self):
+        await self.create_data(250)
 
-    async def assertT(self, expected):
         curs = await self.db.execute('select k from t order by k')
-        ks = [k for k, in await curs.fetchall()]
-        self.assertEqual(ks, expected)
+        accum = []
+        async for row in curs:
+            accum.append(row)
+
+        self.assertEqual(len(accum), 250)
+        self.assertEqual(accum[0], ('k000',))
+        self.assertEqual(accum[249], ('k249',))
+
+        curs = await self.db.execute('select k from t where k is null')
+        accum = []
+        async for row in curs:
+            accum.append(row)
+        self.assertEqual(accum, [])
+
+        curs = await self.db.execute('select k from t where k = ?', ('k100',))
+        accum = []
+        async for row in curs:
+            accum.append(row)
+        self.assertEqual(accum, [('k100',)])
+
+        curs = await self.db.execute('select k from t order by k')
+        self.assertEqual(await curs.fetchone(), ('k000',))
+        self.assertEqual(await curs.fetchmany(2), [('k001',), ('k002',)])
+        accum = [row async for row in curs]
+        self.assertEqual(accum[0], ('k003',))
+        self.assertEqual(accum[-1], ('k249',))
+
+    async def test_cursor_attributes(self):
+        await self.db.execute('create table t(alpha, beta, gamma)')
+        curs = await self.db.execute('select alpha, gamma from t')
+        names = [col[0] for col in curs.description]
+        self.assertEqual(names, ['alpha', 'gamma'])
+
+        curs = await self.db.execute('insert into t (alpha) values (?)', (10,))
+        self.assertEqual(curs.lastrowid, 1)
+        self.assertEqual(curs.rowcount, 1)
+        curs = await self.db.execute('insert into t (alpha) values (?)', (20,))
+        self.assertEqual(curs.lastrowid, 2)
+        self.assertEqual(curs.rowcount, 1)
+
+        curs = await self.db.execute('insert into t (alpha) values '
+                                     '(?), (?), (?)', (30, 40, 50))
+        self.assertEqual(curs.lastrowid, 5)
+        self.assertEqual(curs.rowcount, 3)
+
+        curs = await self.db.execute('delete from t where alpha > ?', (30,))
+        self.assertEqual(curs.rowcount, 2)
+
+        curs = await self.db.execute('update t set alpha = alpha + ?', (1,))
+        self.assertEqual(curs.rowcount, 3)
+
+        curs = await self.db.execute('select 2')
+        self.assertEqual(await curs.scalar(), 2)
+
+        curs = await self.db.execute('select 1 where 1 = 0')
+        self.assertIsNone(await curs.scalar())
+
+    async def test_transaction_implicit(self):
+        await self.create_data(0)
+        async with self.db.transaction():
+            await self.insert(1)
+            await self.insert(2)
+            self.assertTrue(self.db.in_transaction)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1, 2])
+
+        with self.assertRaises(ValueError):
+            async with self.db.transaction():
+                await self.insert(3)
+                raise ValueError
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1, 2])
+
+    async def test_transaction_explicit(self):
+        await self.create_data(0)
+        async with self.db.transaction() as txn:
+            await self.insert(1)
+            await txn.commit()
+            await self.insert(2)
+            await txn.rollback()
+            await self.insert(3)
+            self.assertTrue(self.db.in_transaction)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1, 3])
+
+    async def test_savepoint_implicit(self):
+        await self.create_data(0)
+        async with self.db.transaction():
+            await self.insert(1)
+            async with self.db.savepoint():
+                await self.insert(2)
+            self.assertTrue(self.db.in_transaction)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1, 2])
+
+        async with self.db.transaction():
+            await self.insert(3)
+            with self.assertRaises(ValueError):
+                async with self.db.savepoint():
+                    await self.insert(4)
+                    await self.assertT([1, 2, 3, 4])
+                    raise ValueError
+            self.assertTrue(self.db.in_transaction)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1, 2, 3])
+
+    async def test_savepoint_explicit(self):
+        await self.create_data(0)
+        async with self.db.transaction() as txn:
+            await self.insert(1)
+            await txn.commit()
+            async with self.db.savepoint() as sp:
+                await self.insert(2)
+                await sp.rollback()
+                await self.insert(3)
+                await sp.commit()
+                await self.insert(4)
+                await sp.rollback()
+            await self.insert(5)
+            self.assertTrue(self.db.in_transaction)
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([1, 3, 5])
 
     async def test_atomic(self):
-        await self.db.execute('create table t(k, v)')
+        await self.create_data(0)
         self.assertFalse(self.db.in_transaction)
 
         async with self.db.atomic() as tx:
@@ -3498,7 +3711,7 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
         await self.assertT([1, 2, 6, 7, 9])
 
     async def test_atomic_exceptions(self):
-        await self.db.execute('create table t(k, v)')
+        await self.create_data(0)
         await self.db.execute('create unique index t_k on t(k)')
         self.assertFalse(self.db.in_transaction)
 
@@ -3523,6 +3736,56 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
             await self.assertT([2, 3])
 
         await self.assertT([2, 3])
+
+    async def test_pragma(self):
+        result = await self.db.pragma('journal_mode')
+        self.assertEqual(result, 'memory')
+
+        await self.db.pragma('cache_size', -4000)
+        result = await self.db.pragma('cache_size')
+        self.assertEqual(result, -4000)
+
+    async def test_row_factory(self):
+        db = aconnect(':memory:', row_factory=Row)
+        await db.execute('create table t(k, v)')
+        await db.execute('insert into t(k, v) values (?, ?)', ('k1', 'v1'))
+
+        row = await db.execute_one('select * from t')
+        self.assertIsInstance(row, Row)
+        self.assertEqual(row.k, 'k1')
+        self.assertEqual(row['v'], 'v1')
+
+        curs = await db.execute('select * from t')
+        async for row in curs:
+            self.assertEqual(row.k, 'k1')
+            self.assertEqual(row['v'], 'v1')
+
+        await db.close()
+
+    async def test_backup(self):
+        await self.create_data(100)
+        dest = aconnect(':memory:')
+        try:
+            await self.db.backup(dest)
+            count = await dest.execute_scalar('select count(*) from t')
+            self.assertEqual(count, 100)
+        finally:
+            await dest.close()
+
+    async def test_concurrency(self):
+        await self.create_data(0)
+        async def insert(i):
+            await self.db.execute('insert into t(k) values(?)', (i,))
+
+        await asyncio.gather(*[insert(i) for i in range(100)])
+        ct = await self.db.execute_scalar('select count(*) from t')
+        self.assertEqual(ct, 100)
+
+        async def read(i):
+            return await self.db.execute_scalar('select k from t where k = ?',
+                                                (i,))
+        results = await asyncio.gather(*[read(i) for i in range(100)])
+        self.assertEqual(results, list(range(100)))
 
 
 if __name__ == '__main__':

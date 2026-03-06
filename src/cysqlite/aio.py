@@ -83,6 +83,9 @@ class AsyncConnection(object):
         await self._submit(self.conn.rollback)
 
     async def close(self):
+        if not self._thread.is_alive():
+            return False
+
         try:
             await self._submit(self.conn.close)
         finally:

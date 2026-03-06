@@ -11,7 +11,7 @@ Module
 
 .. function:: connect(database, flags=None, timeout=5.0, vfs=None, \
        uri=False, cached_statements=100, extensions=True, \
-       row_factory=None, autoconnect=True)
+       row_factory=None, autoconnect=True, pragmas=None)
 
    Open a :class:`Connection` to the provided database.
 
@@ -26,6 +26,8 @@ Module
    :param bool extensions: Support run-time loadable extensions.
    :param row_factory: Factory implementation for constructing rows, e.g. :class:`Row`
    :param bool autoconnect: Open connection when instantiated.
+   :param dict pragmas: Optional mapping of pragmas to specify when connection
+      is opened, e.g. ``{'journal_mode': 'wal'}``.
    :return: Connection to database.
    :rtype: :class:`Connection`
 
@@ -39,7 +41,7 @@ Module
 
       # Create a connection with a 1s timeout and use the cysqlite Row for
       # query result tuples.
-      conn = Connection('app.db', timeout=1.0, row_factory=Row)
+      conn = connect('app.db', timeout=1.0, row_factory=Row)
 
 .. function:: status(flag)
 
@@ -98,7 +100,7 @@ Connection
 
 .. class:: Connection(database, flags=None, timeout=5.0, vfs=None, \
         uri=False, cached_statements=100, extensions=True, \
-        row_factory=None, autoconnect=True)
+        row_factory=None, autoconnect=True, pragmas=None)
 
    Open a :class:`Connection` to the provided database.
 
@@ -112,6 +114,8 @@ Connection
    :param bool extensions: Support run-time loadable extensions.
    :param row_factory: Factory implementation for constructing rows, e.g. :class:`Row`
    :param bool autoconnect: Open connection when instantiated.
+   :param dict pragmas: Optional mapping of pragmas to specify when connection
+      is opened, e.g. ``{'journal_mode': 'wal'}``.
 
    Default flags are ``SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE``. If ``uri``
    is set **or** ``'://'`` occurs in the database name, ``SQLITE_OPEN_URI``
@@ -707,7 +711,7 @@ Connection
          current, highwater = db.status(SQLITE_DBSTATUS_CACHE_USED)
          print(f'Cache: {current} bytes (peak: {highwater})')
 
-   .. method:: pragma(key, value=SENTINEL, database=None, multi=False)
+   .. method:: pragma(key, value=SENTINEL, database=None, multi=False, permanent=False)
 
       Read or write a SQLite `pragma <https://www.sqlite.org/pragma.html#toc>`_
       to check or adjust run-time behavior.
@@ -717,6 +721,8 @@ Connection
       :param str database: database name to apply pragma to, *optional*.
       :param bool multi: when ``True``, return all results. Useful for pragmas
          that return multiple rows of data, e.g. ``table_list``.
+      :param bool permanent: Restore this pragma if connection closes and is
+         re-opened with ``connect()``.
       :return: the value of the specified pragma, or a :class:`Cursor` if ``multi``
          was specified.
 

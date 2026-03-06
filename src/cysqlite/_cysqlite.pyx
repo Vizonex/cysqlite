@@ -788,6 +788,7 @@ cdef class Connection(_callable_context_manager):
         public object row_factory
         public bint print_callback_tracebacks
         public object _callback_error
+        public dict pragmas
 
         # List of statements, transactions, savepoints, blob handles?
         dict converters  # SQLite decltype -> converter(value).
@@ -801,7 +802,7 @@ cdef class Connection(_callable_context_manager):
 
     def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
                  cached_statements=100, extensions=True, row_factory=None,
-                 autoconnect=True):
+                 autoconnect=True, pragmas=None):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
@@ -810,6 +811,7 @@ cdef class Connection(_callable_context_manager):
         self.cached_statements = cached_statements
         self.extensions = extensions
         self.row_factory = row_factory
+        self.pragmas = pragmas or {}
         self.print_callback_tracebacks = False
         self._callback_error = None
         self.converters = {}
@@ -943,6 +945,10 @@ cdef class Connection(_callable_context_manager):
             sqlite3_close_v2(self.db)
             self.db = NULL
             raise OperationalError(f'error setting busy timeout: {errmsg}')
+
+        if self.pragmas:
+            for key, value in self.pragmas.items():
+                self.pragma(key, value)
 
         return True
 
@@ -1124,12 +1130,15 @@ cdef class Connection(_callable_context_manager):
             raise_sqlite_error(self.db, 'error requesting db status: ')
         return (current, highwater)
 
-    def pragma(self, key, value=SENTINEL, database=None, multi=False):
+    def pragma(self, key, value=SENTINEL, database=None, multi=False,
+               permanent=False):
         if database is not None:
             key = f'"{database}".{key}'
         sql = f'PRAGMA {key}'
         if value is not SENTINEL:
             sql += ' = %s' % (value if value is not None else 0)
+            if permanent:
+                self.pragmas[key] = value
 
         curs = self.execute(sql)
         if multi:
@@ -3157,7 +3166,7 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
 
 def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
             cached_statements=100, extensions=True, row_factory=None,
-            autoconnect=True):
+            autoconnect=True, pragmas=None):
     """Open a connection to an SQLite database."""
     conn = Connection(database,
                       flags=flags,
@@ -3167,7 +3176,8 @@ def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
                       cached_statements=cached_statements,
                       extensions=extensions,
                       row_factory=row_factory,
-                      autoconnect=autoconnect)
+                      autoconnect=autoconnect,
+                      pragmas=pragmas)
     return conn
 
 
