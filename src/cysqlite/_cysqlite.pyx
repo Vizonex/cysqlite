@@ -319,6 +319,7 @@ cdef class Statement(object):
             const char *buf
             Py_ssize_t nbytes
             Py_buffer view
+            bint adapt = bool(self.conn.adapters)
             int i = 1, rc = 0
             int pc
             tuple tparams
@@ -340,6 +341,11 @@ cdef class Statement(object):
         # Note: sqlite3_bind_XXX uses 1-based indexes.
         for i in range(pc):
             param = tparams[i]
+
+            if adapt:
+                param_type = type(param)
+                if param_type in self.conn.adapters:
+                    param = self.conn.adapters[param_type](param)
 
             if param is None:
                 rc = sqlite3_bind_null(self.st, i + 1)
@@ -792,6 +798,7 @@ cdef class Connection(_callable_context_manager):
 
         # List of statements, transactions, savepoints, blob handles?
         dict converters  # SQLite decltype -> converter(value).
+        dict adapters  # Python type -> adapter(value).
         dict functions  # name -> fn.
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
@@ -815,6 +822,7 @@ cdef class Connection(_callable_context_manager):
         self.print_callback_tracebacks = False
         self._callback_error = None
         self.converters = {}
+        self.adapters = {}
 
         self.db = NULL
         self.functions = {}
@@ -1322,6 +1330,18 @@ cdef class Connection(_callable_context_manager):
     def converter(self, data_type):
         def inner(fn):
             self.register_converter(data_type, fn)
+            return fn
+        return inner
+
+    def register_adapter(self, python_type, fn):
+        self.adapters[python_type] = fn
+
+    def unregister_adapter(self, python_type):
+        return bool(self.adapters.pop(python_type, None))
+
+    def adapter(self, python_type):
+        def inner(fn):
+            self.register_adapter(python_type, fn)
             return fn
         return inner
 

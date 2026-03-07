@@ -155,6 +155,77 @@ Connection
       Return the most-recent error raised inside a user-defined callback. Upon
       reading (or when the database is closed) this value is cleared.
 
+   .. method:: register_adapter(python_type, fn)
+
+      Register an adapter for Python data-types used as bound parameters, e.g.
+      automatically serialize ``dict`` as JSON.
+
+      The ``fn`` function accepts a single value and converts it to the
+      appropriate type supported natively by SQLite (see :ref:`sqlite-notes`).
+
+      :param python_type: python data-type to adapt, e.g. ``dict``.
+      :param fn: ``callable`` that accepts a single value and adapts it.
+
+      Data-type matching is exact, inheritance is not checked.
+
+      Example:
+
+      .. code-block:: python
+
+         db = cysqlite.connect(':memory:')
+
+         # Automatically serialize dict as JSON.
+         db.register_adapter(dict, json.dumps)
+
+         # Or use the `adapter()` decorator.
+         @db.adapter(datetime.datetime)
+         def adapt_datetime(value):
+             # Converts datetimes to a UNIX timestamp.
+             return value.timestamp()
+
+         # Store Decimal as TEXT to avoid floating-point precision errors.
+         @db.adapter(Decimal)
+         def adapt_decimal(value):
+             return str(value)
+
+         vals = [
+             {'key': 'value'},
+             datetime.datetime(2026, 1, 2, 3, 4, 5),
+             Decimal('1.3'),
+         ]
+         for val in vals:
+             res = db.execute_scalar('select ?', (val,))
+             print(f'{res} ({type(res)})')
+
+         # {"key": "value"} <class 'str'>
+         # 1767344645.0 <class 'float'>
+         # 1.3 <class 'str'>
+
+      .. seealso:: :meth:`Connection.register_converter`
+
+   .. method:: adapter(python_type)
+
+      Decorator for registering user-defined adapter.
+
+      :param python_type: python data-type to adapt, e.g. ``dict``.
+
+      .. code-block:: python
+
+         db = cysqlite.connect(':memory:')
+
+         @db.adapter(dict)
+         def adapt_dict(value):
+             return json.dumps(value)
+
+      .. seealso:: :meth:`Connection.register_adapter`
+
+   .. method:: unregister_adapter(python_type)
+
+      Unregister adapter for the given Python type.
+
+      :param python_type: python type to unregister.
+      :return: True or False if adapter was found and removed.
+
    .. method:: register_converter(data_type, fn)
 
       Register a converter for non-standard data-types declared in SQLite, e.g.

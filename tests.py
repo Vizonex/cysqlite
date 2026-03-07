@@ -1024,6 +1024,51 @@ class TestQueryTypes(BaseTestCase):
             ins(None, 3)
 
 
+class TestAdapters(BaseTestCase):
+    filename = ':memory:'
+
+    def setUp(self):
+        super(TestAdapters, self).setUp()
+
+        @self.db.adapter(datetime.datetime)
+        def adapt_datetime(val):
+            return val.timestamp()
+
+        @self.db.adapter(datetime.date)
+        def adapt_date(val):
+            return int(val.strftime('%Y%m%d'))
+
+        self.db.register_adapter(dict, json.dumps)
+        self.db.register_adapter(decimal.Decimal, str)
+
+    def test_adapters(self):
+        dt = datetime.datetime(2026, 1, 2, 3, 4, 5)
+        d = datetime.date(2026, 2, 28)
+
+        vals = [(dt, dt.timestamp()),
+                (d, 20260228),
+                ({'key': 'value'}, '{"key": "value"}'),
+                (decimal.Decimal('1.3'), '1.3')]
+        for src, adapted in vals:
+            res = self.db.execute_scalar('select ?', (src,))
+            self.assertEqual(res, adapted)
+
+        self.db.unregister_adapter(datetime.date)
+
+        vals = [(dt, dt.timestamp()),
+                (d, '2026-02-28')]
+        for src, adapted in vals:
+            res = self.db.execute_scalar('select ?', (src,))
+            self.assertEqual(res, adapted)
+
+    def test_adapter_error(self):
+        def buggy(val):
+            raise ValueError('fail')
+        self.db.register_adapter(list, buggy)
+        with self.assertRaises(ValueError):
+            self.db.execute('select ?', ([1, 2, 3],))
+
+
 class TestConverters(BaseTestCase):
     filename = ':memory:'
 

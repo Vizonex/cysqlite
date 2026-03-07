@@ -28,18 +28,19 @@ The following shows the correspondence between Python types and SQLite types:
 Additionally, for convenience, cysqlite applies the following rules for
 adapting Python types:
 
-+-------------------------------+------------------------------------------+
-| Python type                   | SQLite type                              |
-+===============================+==========================================+
-| ``datetime``                  | ``TEXT`` (isoformat with ' ' delimiter). |
-+-------------------------------+------------------------------------------+
-| ``date``                      | ``TEXT`` (isoformat)                     |
-+-------------------------------+------------------------------------------+
-| ``Fraction``, ``Decimal``,    | ``REAL``                                 |
-| ``__float__()``               |                                          |
-+-------------------------------+------------------------------------------+
-| **Anything else**             | ``TEXT`` (coerced to ``str()``)          |
-+-------------------------------+------------------------------------------+
++-------------------------------+-------------------------------------------+
+| Python type                   | SQLite type                               |
++===============================+===========================================+
+| ``datetime``                  | ``TEXT`` (isoformat with ' ' delimiter).  |
++-------------------------------+-------------------------------------------+
+| ``date``                      | ``TEXT`` (isoformat)                      |
++-------------------------------+-------------------------------------------+
+| ``Fraction``, ``Decimal``,    | ``REAL``                                  |
+| ``__float__()``               |                                           |
++-------------------------------+-------------------------------------------+
+| **Anything else**             | ``TEXT`` (coerced to ``str()``) or custom |
+|                               | via :meth:`Connection.register_adapter`.  |
++-------------------------------+-------------------------------------------+
 
 Examples:
 
@@ -73,16 +74,45 @@ Examples:
    # ('text',    '2026-03-04')
    # ('text',    '0c4ca10a-56ab-470a-9357-d28366d97ceb')
 
-By default, no special attempts at type inference are applied to data coming
-**from** SQLite. As you can see in the above example, all our Python values
-were coerced to reasonable SQLite-friendly representations. But that richness
-is lost when going from SQLite to Python without specific helpers that read the
-column type of the value.
+Adapters
+^^^^^^^^
+
+We can add our own custom adapters to control exactly how Python types are
+sent to SQLite using :meth:`Connection.register_adapter` and the
+:meth:`~Connection.adapter` decorator. For example, it may be desirable to
+store ``Decimal`` values as ``TEXT`` in order to avoid float-point precision
+issues, or to store ``date`` as an 8-digit integer:
+
+.. code-block:: python
+
+   db.register_adapter(Decimal, str)
+
+   @db.adapter(datetime.date)
+   def adapt_date(value):
+       return int(value.strftime('%Y%m%d'))
+
+   values = [
+       date(2026, 3, 4),
+       Decimal('1.3'),
+   ]
+
+   for value in values:
+       row = db.execute_one('select typeof(?), ?', (value, value))
+       print(row)
+
+   # ('integer', 20260304)
+   # ('text',    '1.3')
 
 .. _sqlite-converters:
 
 Converters
 ^^^^^^^^^^
+
+By default, no special attempts at type inference are applied to data coming
+**from** SQLite. As you can see in the above examples, all our Python values
+were coerced to reasonable SQLite-friendly representations. But that richness
+is lost when going from SQLite to Python without specific helpers that read the
+column type of the value.
 
 To convert data coming from SQLite to Python, you will need to register one or
 more converters using :meth:`Connection.register_converter` or using the
