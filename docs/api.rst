@@ -1361,11 +1361,13 @@ Connection
          # raises OperationalError - not authorized (code=23).
          db.execute('update log set status=? where id=?', (0, 1))
 
-   .. method:: trace(fn, mask=2)
+   .. method:: trace(fn, mask=2, expand_sql=True)
 
       :param fn: callable or ``None`` to clear the current trace hook.
       :param int mask: mask of what types of events to trace. Default value
           corresponds to ``SQLITE_TRACE_PROFILE``.
+      :param bool expand_sql: Pass callback the ``sqlite3_expanded_sql()``
+          from ``sqlite3_stmt`` (expands bound parameters)
 
       Mask must consist of one or more of the following constants combined with
       bitwise-or:
@@ -1380,7 +1382,8 @@ Connection
 
       * event: type of event, e.g. ``SQLITE_TRACE_PROFILE``.
       * sid: memory address of statement (for ``SQLITE_TRACE_CLOSE``, ``sid=-1``).
-      * sql: expanded SQL string including bound parameters (for ``SQLITE_TRACE_CLOSE``, ``sql=None``).
+      * sql: SQL string. If ``expand_sql`` then bound parameters will be
+        expanded (for ``SQLITE_TRACE_CLOSE``, ``sql=None``).
       * ns: estimated number of nanoseconds the statement took to run (only
         ``SQLITE_TRACE_PROFILE``), else -1.
 

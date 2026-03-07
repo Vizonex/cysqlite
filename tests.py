@@ -2064,6 +2064,23 @@ class TestUserDefinedCallbacks(BaseTestCase):
             (4, 'select key from kv order by key'),
         ])
 
+    def test_trace_sql(self):
+        accum = []
+        def tracer(code, sid, sql, ns):
+            accum.append(sql)
+
+        self.db.trace(tracer)
+        self.db.execute('select ?, ?, ?', (1, None, 'test'))
+        self.assertEqual(accum, ['select 1, NULL, \'test\''])
+
+        self.db.trace(tracer, expand_sql=False)
+        self.db.execute('select ?, ?, ?', (1, None, 'test'))
+        self.assertEqual(accum, [
+            'select 1, NULL, \'test\'',
+            'select ?, ?, ?'])
+
+        self.db.trace(None)
+
     def test_broken_tracer(self):
         def broken(code, sid, sql, ns):
             raise ValueError('trace fail')
