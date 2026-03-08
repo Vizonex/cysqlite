@@ -3482,6 +3482,52 @@ class TestMedianUDF(BaseTestCase):
             ('k4', 1, 10),  ('k4', 10000, 10), ('k4', 10, 10)])
 
 
+#
+# Utils.
+#
+from cysqlite.utils import Pool
+
+
+class TestPool(unittest.TestCase):
+    filename = '/tmp/cysqlite.db'
+
+    def setUp(self):
+        self.pool = Pool(
+            self.filename,
+            pragmas={'cache_size': -4000})
+
+    def tearDown(self):
+        self.pool.close()
+        self.cleanup()
+
+    def cleanup(self):
+        for filename in glob.glob(self.filename.replace('.db', '*')):
+            if os.path.isfile(filename):
+                os.unlink(filename)
+
+    def test_pool_pragmas(self):
+        for factory in (self.pool.reader, self.pool.writer):
+            with factory() as conn:
+                self.assertEqual(conn.database, self.filename)
+                self.assertEqual(conn.pragma('cache_size'), -4000)
+                self.assertEqual(conn.pragma('journal_mode'), 'wal')
+
+    def test_reader_read_only(self):
+        with self.pool.reader() as conn:
+            self.assertEqual(conn.execute_scalar('select 1'), 1)
+            with self.assertRaises(OperationalError):
+                conn.pragma('application_id', 1337)
+            with self.assertRaises(OperationalError):
+                conn.execute('create table g(k)')
+
+    def test_writer(self):
+        with self.pool.writer() as conn:
+            conn.execute('create table g(k)')
+            conn.execute('insert into g(k) values (?), (?)', ('k1', 'k2'))
+            res = conn.execute('select * from g order by k')
+            self.assertEqual(res.fetchall(), [('k1',), ('k2',)])
+
+
 from cysqlite.aio import connect as aconnect
 
 
