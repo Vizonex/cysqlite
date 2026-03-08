@@ -323,6 +323,21 @@ Connection
       :param str data_type: declared SQLite data-type to apply conversion to.
       :return: True or False if data-type was found and removed.
 
+   .. method:: register_type(data_type=None, converter=None, python_type=None, adapter=None)
+
+      :param str data_type: declared SQLite data-type to apply conversion to.
+      :param converter: ``callable`` that accepts a single value and converts it.
+      :param python_type: python data-type to adapt, e.g. ``dict``.
+      :param adapter: ``callable`` that accepts a single value and adapts it.
+
+      Short-hand method to register a convert and an adapter at once.
+
+      Example:
+
+      .. code-block:: python
+
+         db.register_type('json', json.loads, dict, json.dumps)
+
    .. method:: connect()
 
       Open connection to the database.
