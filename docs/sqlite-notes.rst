@@ -75,7 +75,7 @@ Examples:
    # ('text',    '0c4ca10a-56ab-470a-9357-d28366d97ceb')
 
 Adapters
-^^^^^^^^
+---------
 
 We can add our own custom adapters to control exactly how Python types are
 sent to SQLite using :meth:`Connection.register_adapter` and the
@@ -106,7 +106,7 @@ issues, or to store ``date`` as an 8-digit integer:
 .. _sqlite-converters:
 
 Converters
-^^^^^^^^^^
+-----------
 
 By default, no special attempts at type inference are applied to data coming
 **from** SQLite. As you can see in the above examples, all our Python values
@@ -181,3 +181,27 @@ a specified data-type to what SQLite tells us:
 * Split on the first whitespace or ``"("`` character, e.g. if SQLite
   tells us the data-type is ``NUMERIC(10, 2)``, cysqlite will attempt to
   find a converter named ``numeric``.
+
+AsyncIO
+-----------
+
+At the time of writing, cysqlite provides an experimental asyncio
+implementation in ``cysqlite.aio``.
+
+SQLite operates on local disk storage, so queries typically execute extremely
+quickly (microseconds / few milliseconds). The cost of dispatching to a
+background thread and wrapping in coroutines increases the latency per query.
+For every query executed, a closure must be created, a future allocated, a
+queue written-to, a loop ``call_soon_threadsafe()`` issued, and two context
+switches made. This is the case with cysqlite and other drivers like `aiosqlite <https://github.com/omnilib/aiosqlite/blob/main/aiosqlite/core.py>`__.
+
+If your SQLite workload is heavy enough that avoiding blocking the event-loop
+is an important issue, your application probably has concurrency requirements
+that SQLite will not be able to solve. SQLite only allows one writer at a time,
+so while using an async wrapper may keep things responsive while waiting to
+obtain the write lock, writes will not occur "faster", the bottleneck has
+merely been moved. Conversely, if you don’t have that much load, the async
+wrapper adds complexity and overhead for no measurable benefit.
+
+For web applications wishing to use ``await``, cysqlite provides an
+experimental implementation of the core driver routines.
