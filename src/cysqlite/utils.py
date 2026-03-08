@@ -2,12 +2,12 @@ import logging
 import queue
 import threading
 
-from cysqlite import connect
-from cysqlite import SQLITE_OPEN_CREATE
-from cysqlite import SQLITE_OPEN_READONLY
-from cysqlite import SQLITE_OPEN_READWRITE
-from cysqlite import SQLITE_OPEN_WAL
-from cysqlite import SQLITE_TRACE_PROFILE
+from cysqlite._cysqlite import connect
+from cysqlite._constants import SQLITE_OPEN_CREATE
+from cysqlite._constants import SQLITE_OPEN_READONLY
+from cysqlite._constants import SQLITE_OPEN_READWRITE
+from cysqlite._constants import SQLITE_OPEN_WAL
+from cysqlite._constants import SQLITE_TRACE_PROFILE
 from cysqlite.exceptions import InterfaceError
 
 

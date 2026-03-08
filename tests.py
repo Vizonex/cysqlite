@@ -3527,6 +3527,20 @@ class TestPool(unittest.TestCase):
             res = conn.execute('select * from g order by k')
             self.assertEqual(res.fetchall(), [('k1',), ('k2',)])
 
+    def test_writer_lock(self):
+        with self.pool.writer() as conn:
+            conn.execute('create table g(k)')
+        def t(n):
+            with self.pool.writer() as conn:
+                with conn.atomic() as tx:
+                    for i in range(n):
+                        conn.execute('insert into g(k) values(?)', (i,))
+        ts = [threading.Thread(target=t, args=(10,)) for _ in range(8)]
+        for t in ts: t.start()
+        for t in ts: t.join()
+        with self.pool.reader() as conn:
+            self.assertEqual(conn.execute_scalar('select count(*) from g'), 80)
+
 
 from cysqlite.aio import connect as aconnect
 
