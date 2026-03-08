@@ -3541,6 +3541,22 @@ class TestPool(unittest.TestCase):
         with self.pool.reader() as conn:
             self.assertEqual(conn.execute_scalar('select count(*) from g'), 80)
 
+    def test_closed(self):
+        self.pool.close()
+        with self.assertRaises(InterfaceError):
+            with self.pool.reader() as conn:
+                pass
+        with self.assertRaises(InterfaceError):
+            with self.pool.writer() as conn:
+                pass
+
+    def test_no_writer(self):
+        pool = Pool(':memory:', writer=False)
+        with self.assertRaises(InterfaceError):
+            with pool.writer() as conn:
+                pass
+        pool.close()
+
 
 from cysqlite.aio import connect as aconnect
 

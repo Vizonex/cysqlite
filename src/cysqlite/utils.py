@@ -19,7 +19,7 @@ def slow_query_log(conn, threshold_ms=50, logger=None, level=logging.WARNING,
             return
         ms = ns / 1000000
         if ms >= threshold_ms:
-            log.log(level, 'Slow query %0.1fms: %s', ms, sql)
+            log.log(level, '[%0.1fms]: %s', ms, sql)
 
     conn.trace(trace, SQLITE_TRACE_PROFILE, expand_sql=expand_sql)
     return True
@@ -70,6 +70,8 @@ class Pool(object):
     def writer(self):
         if self._closed:
             raise InterfaceError('Pool is closed')
+        if self._writer is None:
+            raise InterfaceError('Pool writer connection disabled.')
         return _Writer(self)
 
     def close(self):

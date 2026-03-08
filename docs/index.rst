@@ -69,3 +69,4 @@ Example usage:
    installation
    sqlite-notes
    api
+   utils
