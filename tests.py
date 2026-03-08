@@ -1068,6 +1068,16 @@ class TestAdapters(BaseTestCase):
         with self.assertRaises(ValueError):
             self.db.execute('select ?', ([1, 2, 3],))
 
+    def test_register_type(self):
+        self.db.register_type('json', json.loads, dict, json.dumps)
+        row = self.db.execute_one('select ?', ({'key': 'value'},))
+        self.assertEqual(row, ('{"key": "value"}',))
+
+        self.db.execute('create table g(data json)')
+        self.db.execute('insert into g(data) values (?)', ({'key': 'value'},))
+        row = self.db.execute_one('select data from g')
+        self.assertEqual(row, ({'key': 'value'},))
+
 
 class TestConverters(BaseTestCase):
     filename = ':memory:'

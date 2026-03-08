@@ -1345,6 +1345,13 @@ cdef class Connection(_callable_context_manager):
             return fn
         return inner
 
+    def register_type(self, data_type=None, converter=None, python_type=None,
+                      adapter=None):
+        if data_type is not None:
+            self.register_converter(data_type, converter)
+        if python_type is not None:
+            self.register_adapter(python_type, adapter)
+
     def load_extension(self, name):
         check_connection(self)
         cdef:
