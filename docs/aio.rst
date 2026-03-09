@@ -4,9 +4,10 @@
 Async I/O
 =========
 
+.. module:: cysqlite.aio
+
 The ``cysqlite.aio`` module provides an experimental asyncio interface to
-cysqlite. Queries and other blocking methods get sent to a worker thread (like
-in ``aiosqlite``).
+cysqlite. Queries and other blocking methods get sent to a worker thread.
 
 SQLite operates on local disk storage, so queries typically execute extremely
 quickly (microseconds / few milliseconds). The cost of dispatching to a
@@ -16,10 +17,9 @@ queue written-to, a loop ``call_soon_threadsafe()`` issued, and two context
 switches made. This is the case with cysqlite and other drivers like `aiosqlite <https://github.com/omnilib/aiosqlite/blob/main/aiosqlite/core.py>`__.
 
 If your SQLite workload is heavy enough that avoiding blocking the event-loop
-is an important issue, your application probably has concurrency requirements
-that SQLite will not be able to solve. SQLite only allows one writer at a time,
-so while using an async wrapper may keep things responsive while waiting to
-obtain the write lock, writes will not occur "faster", the bottleneck has
+is an issue, SQLite may not be a good fit. SQLite only allows one writer at a
+time, so while using an async wrapper may keep things responsive while waiting
+to obtain the write lock, writes will not occur "faster", the bottleneck has
 merely been moved. Conversely, if you don’t have that much load, the async
 wrapper adds complexity and overhead for no measurable benefit.
 
@@ -30,38 +30,11 @@ changes things so that now there are plenty of tables, but only one set of
 plates. Everybody can sit down, but they are still waiting, since the plates
 can only be at one table at any given time.
 
-Nonetheless, for web applications wishing to use ``await`` for local
-development, cysqlite provides an experimental async implementation of the core
-driver routines.
-
-.. module:: cysqlite.aio
-
-Worker Thread
----------------
-
-Every :class:`AsyncConnection` has a dedicated background ``threading.Thread``
-from which it pulls queries or other blocking operations. All SQLite calls for
-a given connection are serialized through that thread.
-
-:class:`AsyncConnection` may be shared across async tasks with an important
-caveat:
-
-Transactions and savepoints **will** end up getting interleaved if your
-connection is used by multiple tasks and you have any concurrency. This will
-certainly cause problems. aiosqlite suffers from this problem as well (since
-2018). Consider this example:
-
-.. code-block:: python
-
-   async def task_a(db):
-       async with db.atomic() as tx:
-           await db.execute('insert into ...')
-           await asyncio.sleep(0)  # Switch tasks...
-
-   async def task_b(db):
-       async with db.atomic() as tx:
-           await db.execute('insert into ...')
-           await tx.rollback()  # Rolls back `task_a()` as well!!
+Additionally, if multiple coroutines share a single async connection, transaction
+state can get interleaved between tasks, leading to data corruption. Transactions
+and savepoints **will** end up getting interleaved if your connection is used by
+multiple tasks and you have any concurrency. aiosqlite suffers from this problem
+as well (since 2018!).
 
 The bottom-line is that the best ways to avoid blowing off your foot:
 
@@ -73,10 +46,10 @@ Example pool usage:
 
 .. code-block:: python
 
+   # Pool serializes access to the writer, so transactions are safe.
    pool = Pool('app.db')
 
    async def task_a(pool):
-       # Pool serializes access to the writer, so this is safe:
        async with pool.writer() as db:
            async with db.atomic() as tx:
                await db.execute('insert into ...')
@@ -87,7 +60,6 @@ Example pool usage:
            async with db.atomic() as tx:
                await db.execute('insert into ...')
                await tx.rollback()
-
 
 Module
 ------
@@ -147,6 +119,10 @@ AsyncConnection
 
    :param Connection conn: synchronous cysqlite connection.
    :param loop: the running asyncio event loop.
+
+   Every :class:`AsyncConnection` has a dedicated background ``threading.Thread``
+   from which it pulls queries or other blocking operations. All SQLite calls for
+   a given connection are serialized through that thread.
 
    .. attribute:: conn
 
