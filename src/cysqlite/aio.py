@@ -79,6 +79,9 @@ class AsyncConnection(object):
     async def execute_scalar(self, sql, params=None):
         return await self._submit(self.conn.execute_scalar, sql, params)
 
+    async def begin(self, lock=None):
+        await self._submit(self.conn.begin, lock=lock)
+
     async def commit(self):
         await self._submit(self.conn.commit)
 
@@ -99,6 +102,9 @@ class AsyncConnection(object):
 
     async def last_insert_rowid(self):
         return await self._submit(self.conn.last_insert_rowid)
+
+    async def changes(self):
+        return await self._submit(self.conn.changes)
 
     async def backup(self, dest, **kwargs):
         await self._submit(self.conn.backup, dest.conn, **kwargs)

@@ -479,7 +479,8 @@ Connection
       :param str sql: SQL query to execute.
       :param params: parameters for query (optional).
       :type params: tuple, list, sequence, dict, or ``None``.
-      :return: a single row of data or ``None`` if no results.
+      :return: first row or ``None`` if no results.
+      :rtype: tuple, :class:`~cysqlite.Row`, or ``None``
 
       Example:
 
@@ -541,7 +542,7 @@ Connection
 
    .. method:: commit()
 
-      Commit the currently-active transaction.
+      Commit the current transaction.
 
       If no transaction is active, raises :class:`OperationalError`.
 
@@ -580,7 +581,7 @@ Connection
 
    .. property:: in_transaction
 
-      Returns whether a transaction is currently-active.
+      Returns whether a transaction is currently active.
 
       :rtype: bool
 
@@ -977,7 +978,7 @@ Connection
 
       Perform an online backup to the given destination :class:`Connection`.
 
-      :param Connection destination: database to serve as destination for the backup.
+      :param Connection dest: database to serve as destination for the backup.
       :param int pages: Number of pages per iteration. Default value of -1
           indicates all pages should be backed-up in a single step.
       :param str name: Name of source database (may differ if you used ATTACH
@@ -1808,8 +1809,7 @@ Cursor
       result rows, or this will result in an :class:`OperationalError`.
 
       :param str sql: SQL query to execute.
-      :param seq_of_params: iterable of parameters to repeatedly execute the
-        query with.
+      :param seq_of_params: iterable of parameters.
       :type seq_of_params: sequence of tuple, list, sequence, dict, or ``None``.
       :return: self
       :rtype: :class:`Cursor`
@@ -2230,6 +2230,61 @@ Blob
 
          print(blob[0:8])   # b'ZBCDwxyz'
          blob.close()
+
+
+Transaction Wrappers
+--------------------
+
+.. class:: Atomic(conn, lock=None)
+
+   Context-manager or decorator implementation for :meth:`Connection.atomic`.
+   Uses a transaction at the outermost level and savepoints for nested calls.
+
+   .. method:: __enter__()
+
+      Begin the transaction or savepoint.
+
+   .. method:: __exit__(exc_type, exc_val, exc_tb)
+
+      Commit the transaction or savepoint if exiting cleanly. If an unhandled
+      exception occurred, roll back.
+
+   .. method:: __call__(fn)
+
+      Decorate the wrapped function with a transaction or savepoint. Equivalent
+      to:
+
+      .. code-block::
+
+         @db.atomic()
+         def modify_data():
+             ...
+
+         def modify_data():
+             with db.atomic():
+                 ...
+
+   .. method:: commit()
+
+      Explicitly commit the transaction/savepoint. A new transaction/savepoint
+      will begin automatically.
+
+   .. method:: rollback()
+
+      Explicitly roll backthe transaction/savepoint. A new transaction/savepoint
+      will begin automatically.
+
+
+.. class:: Transaction(conn, lock=None)
+
+   Context-manager or decorator implementation for :meth:`Connection.transaction`.
+   Same API as :class:`Atomic`.
+
+
+.. class:: Savepoint(conn, sid=None)
+
+   Context-manager or decorator implementation for :meth:`Connection.savepoint`.
+   Same API as :class:`Atomic`.
 
 
 TableFunction

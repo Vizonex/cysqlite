@@ -70,3 +70,4 @@ Example usage:
    sqlite-notes
    api
    utils
+   aio

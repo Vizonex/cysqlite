@@ -3749,6 +3749,29 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
         curs = await self.db.execute('select 1 where 1 = 0')
         self.assertIsNone(await curs.scalar())
 
+    async def test_transaction_methods(self):
+        await self.create_data(0)
+
+        await self.db.begin()
+        with self.assertRaises(OperationalError):
+            await self.db.begin()
+
+        await self.insert(1)
+        await self.db.rollback()
+
+        with self.assertRaises(OperationalError):
+            await self.db.rollback()
+
+        await self.db.begin()
+        await self.insert(2)
+        await self.db.commit()
+
+        with self.assertRaises(OperationalError):
+            await self.db.commit()
+
+        self.assertFalse(self.db.in_transaction)
+        await self.assertT([2])
+
     async def test_transaction_implicit(self):
         await self.create_data(0)
         async with self.db.transaction():
