@@ -6,6 +6,9 @@ from functools import partial
 from cysqlite._cysqlite import connect as _connect
 from cysqlite._cysqlite import Connection
 from cysqlite._cysqlite import Row
+from cysqlite.exceptions import InterfaceError
+from cysqlite.utils import _ConnectionContext
+from cysqlite.utils import Pool as _Pool
 
 
 SHUTDOWN = object()
@@ -76,6 +79,9 @@ class AsyncConnection(object):
     async def execute_scalar(self, sql, params=None):
         return await self._submit(self.conn.execute_scalar, sql, params)
 
+    async def begin(self, lock=None):
+        await self._submit(self.conn.begin, lock=lock)
+
     async def commit(self):
         await self._submit(self.conn.commit)
 
@@ -96,6 +102,9 @@ class AsyncConnection(object):
 
     async def last_insert_rowid(self):
         return await self._submit(self.conn.last_insert_rowid)
+
+    async def changes(self):
+        return await self._submit(self.conn.changes)
 
     async def backup(self, dest, **kwargs):
         await self._submit(self.conn.backup, dest.conn, **kwargs)
@@ -230,3 +239,64 @@ def connect(database, **kwargs):
     loop = asyncio.get_running_loop()
     conn = _connect(database, **kwargs)
     return AsyncConnection(conn, loop=loop)
+
+
+class Pool(_Pool):
+    def initialize_pool(self, readers, writer):
+        self._loop = asyncio.get_running_loop()
+        self._readers = asyncio.Queue()
+        self._writer_lock = asyncio.Lock()
+        self._writer = None
+
+        if writer:
+            self._writer = AsyncConnection(
+                self._connect(read_only=False),
+                loop=self._loop)
+
+        for _ in range(readers):
+            self._readers.put_nowait(AsyncConnection(
+                self._connect(read_only=True),
+                loop=self._loop))
+
+    def reader(self):
+        self._check_closed()
+        return _AsyncReader(self)
+
+    def writer(self):
+        self._check_closed()
+        if self._writer is None:
+            raise InterfaceError('Pool writer connection disabled.')
+        return _AsyncWriter(self)
+
+    async def close(self):
+        self._closed = True
+        if self._writer is not None:
+            await self._writer.close()
+            self._writer = None
+        while not self._readers.empty():
+            await self._readers.get_nowait().close()
+
+
+class _AsyncReader(_ConnectionContext):
+    async def __aenter__(self):
+        self.conn = await self.pool._readers.get()
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.conn is not None:
+            await self.pool._readers.put(self.conn)
+            self.conn = None
+
+class _AsyncWriter(_ConnectionContext):
+    async def __aenter__(self):
+        await self.pool._writer_lock.acquire()
+        self.conn = self.pool._writer
+        return self.conn
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self.conn.in_transaction:
+                await self.conn.rollback()
+        finally:
+            self.conn = None
+            self.pool._writer_lock.release()

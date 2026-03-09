@@ -319,6 +319,7 @@ cdef class Statement(object):
             const char *buf
             Py_ssize_t nbytes
             Py_buffer view
+            bint adapt = bool(self.conn.adapters)
             int i = 1, rc = 0
             int pc
             tuple tparams
@@ -340,6 +341,11 @@ cdef class Statement(object):
         # Note: sqlite3_bind_XXX uses 1-based indexes.
         for i in range(pc):
             param = tparams[i]
+
+            if adapt:
+                param_type = type(param)
+                if param_type in self.conn.adapters:
+                    param = self.conn.adapters[param_type](param)
 
             if param is None:
                 rc = sqlite3_bind_null(self.st, i + 1)
@@ -792,6 +798,7 @@ cdef class Connection(_callable_context_manager):
 
         # List of statements, transactions, savepoints, blob handles?
         dict converters  # SQLite decltype -> converter(value).
+        dict adapters  # Python type -> adapter(value).
         dict functions  # name -> fn.
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
@@ -815,6 +822,7 @@ cdef class Connection(_callable_context_manager):
         self.print_callback_tracebacks = False
         self._callback_error = None
         self.converters = {}
+        self.adapters = {}
 
         self.db = NULL
         self.functions = {}
@@ -1325,6 +1333,25 @@ cdef class Connection(_callable_context_manager):
             return fn
         return inner
 
+    def register_adapter(self, python_type, fn):
+        self.adapters[python_type] = fn
+
+    def unregister_adapter(self, python_type):
+        return bool(self.adapters.pop(python_type, None))
+
+    def adapter(self, python_type):
+        def inner(fn):
+            self.register_adapter(python_type, fn)
+            return fn
+        return inner
+
+    def register_type(self, data_type=None, converter=None, python_type=None,
+                      adapter=None):
+        if data_type is not None:
+            self.register_converter(data_type, converter)
+        if python_type is not None:
+            self.register_adapter(python_type, adapter)
+
     def load_extension(self, name):
         check_connection(self)
         cdef:
@@ -1506,7 +1533,7 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting authorizer: ')
 
-    def trace(self, fn, mask=2):
+    def trace(self, fn, mask=2, expand_sql=True):
         check_connection(self)
         cdef:
             _Callback callback
@@ -1516,7 +1543,7 @@ cdef class Connection(_callable_context_manager):
             self._trace_hook = None
             rc = sqlite3_trace_v2(self.db, 0, NULL, NULL)
         else:
-            callback = _Callback.__new__(_Callback, self, fn)
+            callback = _Callback(self, fn, {'expand_sql': expand_sql})
             self._trace_hook = callback
             rc = sqlite3_trace_v2(self.db, mask, _trace_cb, <void *>callback)
 
@@ -1680,10 +1707,12 @@ cdef class _Callback(object):
     cdef:
         Connection conn
         object fn
+        dict settings
 
-    def __cinit__(self, Connection conn, fn):
+    def __cinit__(self, Connection conn, fn, settings=None):
         self.conn = conn
         self.fn = fn
+        self.settings = settings
 
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
@@ -1974,6 +2003,7 @@ cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
 cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with gil:
     cdef:
         _Callback cb = <_Callback>data
+        bint expand_sql = cb.settings['expand_sql']
         char *zsql
         long long sid = -1
         int64_t ns = -1
@@ -1991,11 +2021,14 @@ cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with g
     # pointer to the db conn, X is unused.
     if event != SQLITE_TRACE_CLOSE:
         sid = <long long>p  # Memory address of statement.
-        zsql = sqlite3_expanded_sql(<sqlite3_stmt *>p)
-        if zsql == NULL:
-            sql = None
-        sql = decode(zsql)
-        sqlite3_free(zsql)
+        if expand_sql:
+            zsql = sqlite3_expanded_sql(<sqlite3_stmt *>p)
+        else:
+            zsql = <char *>sqlite3_sql(<sqlite3_stmt *>p)
+        if zsql is not NULL:
+            sql = decode(zsql)
+            if expand_sql:
+                sqlite3_free(zsql)
 
     if event == SQLITE_TRACE_PROFILE:
         ns = (<int64_t *>x)[0]

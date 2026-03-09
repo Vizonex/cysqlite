@@ -155,6 +155,77 @@ Connection
       Return the most-recent error raised inside a user-defined callback. Upon
       reading (or when the database is closed) this value is cleared.
 
+   .. method:: register_adapter(python_type, fn)
+
+      Register an adapter for Python data-types used as bound parameters, e.g.
+      automatically serialize ``dict`` as JSON.
+
+      The ``fn`` function accepts a single value and converts it to the
+      appropriate type supported natively by SQLite (see :ref:`sqlite-notes`).
+
+      :param python_type: python data-type to adapt, e.g. ``dict``.
+      :param fn: ``callable`` that accepts a single value and adapts it.
+
+      Data-type matching is exact, inheritance is not checked.
+
+      Example:
+
+      .. code-block:: python
+
+         db = cysqlite.connect(':memory:')
+
+         # Automatically serialize dict as JSON.
+         db.register_adapter(dict, json.dumps)
+
+         # Or use the `adapter()` decorator.
+         @db.adapter(datetime.datetime)
+         def adapt_datetime(value):
+             # Converts datetimes to a UNIX timestamp.
+             return value.timestamp()
+
+         # Store Decimal as TEXT to avoid floating-point precision errors.
+         @db.adapter(Decimal)
+         def adapt_decimal(value):
+             return str(value)
+
+         vals = [
+             {'key': 'value'},
+             datetime.datetime(2026, 1, 2, 3, 4, 5),
+             Decimal('1.3'),
+         ]
+         for val in vals:
+             res = db.execute_scalar('select ?', (val,))
+             print(f'{res} ({type(res)})')
+
+         # {"key": "value"} <class 'str'>
+         # 1767344645.0 <class 'float'>
+         # 1.3 <class 'str'>
+
+      .. seealso:: :meth:`Connection.register_converter`
+
+   .. method:: adapter(python_type)
+
+      Decorator for registering user-defined adapter.
+
+      :param python_type: python data-type to adapt, e.g. ``dict``.
+
+      .. code-block:: python
+
+         db = cysqlite.connect(':memory:')
+
+         @db.adapter(dict)
+         def adapt_dict(value):
+             return json.dumps(value)
+
+      .. seealso:: :meth:`Connection.register_adapter`
+
+   .. method:: unregister_adapter(python_type)
+
+      Unregister adapter for the given Python type.
+
+      :param python_type: python type to unregister.
+      :return: True or False if adapter was found and removed.
+
    .. method:: register_converter(data_type, fn)
 
       Register a converter for non-standard data-types declared in SQLite, e.g.
@@ -251,6 +322,21 @@ Connection
 
       :param str data_type: declared SQLite data-type to apply conversion to.
       :return: True or False if data-type was found and removed.
+
+   .. method:: register_type(data_type=None, converter=None, python_type=None, adapter=None)
+
+      :param str data_type: declared SQLite data-type to apply conversion to.
+      :param converter: ``callable`` that accepts a single value and converts it.
+      :param python_type: python data-type to adapt, e.g. ``dict``.
+      :param adapter: ``callable`` that accepts a single value and adapts it.
+
+      Short-hand method to register a convert and an adapter at once.
+
+      Example:
+
+      .. code-block:: python
+
+         db.register_type('json', json.loads, dict, json.dumps)
 
    .. method:: connect()
 
@@ -393,7 +479,8 @@ Connection
       :param str sql: SQL query to execute.
       :param params: parameters for query (optional).
       :type params: tuple, list, sequence, dict, or ``None``.
-      :return: a single row of data or ``None`` if no results.
+      :return: first row or ``None`` if no results.
+      :rtype: tuple, :class:`~cysqlite.Row`, or ``None``
 
       Example:
 
@@ -455,7 +542,7 @@ Connection
 
    .. method:: commit()
 
-      Commit the currently-active transaction.
+      Commit the current transaction.
 
       If no transaction is active, raises :class:`OperationalError`.
 
@@ -494,7 +581,7 @@ Connection
 
    .. property:: in_transaction
 
-      Returns whether a transaction is currently-active.
+      Returns whether a transaction is currently active.
 
       :rtype: bool
 
@@ -891,7 +978,7 @@ Connection
 
       Perform an online backup to the given destination :class:`Connection`.
 
-      :param Connection destination: database to serve as destination for the backup.
+      :param Connection dest: database to serve as destination for the backup.
       :param int pages: Number of pages per iteration. Default value of -1
           indicates all pages should be backed-up in a single step.
       :param str name: Name of source database (may differ if you used ATTACH
@@ -1290,11 +1377,13 @@ Connection
          # raises OperationalError - not authorized (code=23).
          db.execute('update log set status=? where id=?', (0, 1))
 
-   .. method:: trace(fn, mask=2)
+   .. method:: trace(fn, mask=2, expand_sql=True)
 
       :param fn: callable or ``None`` to clear the current trace hook.
       :param int mask: mask of what types of events to trace. Default value
           corresponds to ``SQLITE_TRACE_PROFILE``.
+      :param bool expand_sql: Pass callback the ``sqlite3_expanded_sql()``
+          from ``sqlite3_stmt`` (expands bound parameters)
 
       Mask must consist of one or more of the following constants combined with
       bitwise-or:
@@ -1309,7 +1398,8 @@ Connection
 
       * event: type of event, e.g. ``SQLITE_TRACE_PROFILE``.
       * sid: memory address of statement (for ``SQLITE_TRACE_CLOSE``, ``sid=-1``).
-      * sql: expanded SQL string including bound parameters (for ``SQLITE_TRACE_CLOSE``, ``sql=None``).
+      * sql: SQL string. If ``expand_sql`` then bound parameters will be
+        expanded (for ``SQLITE_TRACE_CLOSE``, ``sql=None``).
       * ns: estimated number of nanoseconds the statement took to run (only
         ``SQLITE_TRACE_PROFILE``), else -1.
 
@@ -1719,8 +1809,7 @@ Cursor
       result rows, or this will result in an :class:`OperationalError`.
 
       :param str sql: SQL query to execute.
-      :param seq_of_params: iterable of parameters to repeatedly execute the
-        query with.
+      :param seq_of_params: iterable of parameters.
       :type seq_of_params: sequence of tuple, list, sequence, dict, or ``None``.
       :return: self
       :rtype: :class:`Cursor`
@@ -2141,6 +2230,61 @@ Blob
 
          print(blob[0:8])   # b'ZBCDwxyz'
          blob.close()
+
+
+Transaction Wrappers
+--------------------
+
+.. class:: Atomic(conn, lock=None)
+
+   Context-manager or decorator implementation for :meth:`Connection.atomic`.
+   Uses a transaction at the outermost level and savepoints for nested calls.
+
+   .. method:: __enter__()
+
+      Begin the transaction or savepoint.
+
+   .. method:: __exit__(exc_type, exc_val, exc_tb)
+
+      Commit the transaction or savepoint if exiting cleanly. If an unhandled
+      exception occurred, roll back.
+
+   .. method:: __call__(fn)
+
+      Decorate the wrapped function with a transaction or savepoint. Equivalent
+      to:
+
+      .. code-block::
+
+         @db.atomic()
+         def modify_data():
+             ...
+
+         def modify_data():
+             with db.atomic():
+                 ...
+
+   .. method:: commit()
+
+      Explicitly commit the transaction/savepoint. A new transaction/savepoint
+      will begin automatically.
+
+   .. method:: rollback()
+
+      Explicitly roll backthe transaction/savepoint. A new transaction/savepoint
+      will begin automatically.
+
+
+.. class:: Transaction(conn, lock=None)
+
+   Context-manager or decorator implementation for :meth:`Connection.transaction`.
+   Same API as :class:`Atomic`.
+
+
+.. class:: Savepoint(conn, sid=None)
+
+   Context-manager or decorator implementation for :meth:`Connection.savepoint`.
+   Same API as :class:`Atomic`.
 
 
 TableFunction
