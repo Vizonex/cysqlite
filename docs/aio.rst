@@ -74,7 +74,7 @@ Module
    :param database: database filename or ``':memory:'``.
    :type database: str, ``pathlib.Path``
    :param kwargs: passed to :func:`cysqlite.connect`, e.g. ``timeout``, ``pragmas``.
-   :return: async connection wrapping a synchronous :class:`~cysqlite.Connection`.
+   :return: async connection wrapping a synchronous :class:`Connection`.
    :rtype: :class:`AsyncConnection`
 
    Example:
@@ -114,7 +114,7 @@ AsyncConnection
 
 .. class:: AsyncConnection(conn, loop)
 
-   Async wrapper around synchronous :class:`~cysqlite.Connection`, created
+   Async wrapper around synchronous :class:`Connection`, created
    by :func:`connect`.
 
    :param Connection conn: synchronous cysqlite connection.
@@ -126,7 +126,7 @@ AsyncConnection
 
    .. attribute:: conn
 
-      The underlying synchronous :class:`~cysqlite.Connection`.
+      The underlying synchronous :class:`Connection`.
 
    .. method:: execute(sql, params=None)
       :async:
@@ -140,7 +140,7 @@ AsyncConnection
       :rtype: :class:`AsyncCursor`
 
       If the awaiting coroutine is cancelled while the query is pending,
-      :meth:`~cysqlite.Connection.interrupt` is called on the underlying
+      :meth:`~Connection.interrupt` is called on the underlying
       connection to abort the in-progress operation.
 
       Example:
@@ -219,7 +219,7 @@ AsyncConnection
       :param str sql: SQL query.
       :param params: parameters (optional).
       :return: first row or ``None``.
-      :rtype: tuple, :class:`~cysqlite.Row`, or ``None``
+      :rtype: tuple, :class:`Row`, or ``None``
 
    .. method:: execute_scalar(sql, params=None)
       :async:
@@ -386,8 +386,8 @@ AsyncConnection
 
       Execute a PRAGMA statement. Returns an awaitable.
 
-      :param args: forwarded to :meth:`~cysqlite.Connection.pragma`.
-      :param kwargs: forwarded to :meth:`~cysqlite.Connection.pragma`.
+      :param args: forwarded to :meth:`Connection.pragma`.
+      :param kwargs: forwarded to :meth:`Connection.pragma`.
 
       Example:
 
@@ -402,7 +402,7 @@ AsyncConnection
       Perform an online backup to the given destination :class:`AsyncConnection`.
 
       :param AsyncConnection dest: database to serve as destination for the backup.
-      :param kwargs: forwarded to :meth:`~cysqlite.Connection.backup`.
+      :param kwargs: forwarded to :meth:`Connection.backup`.
 
       Example:
 
@@ -425,14 +425,14 @@ AsyncConnection
       Perform an online backup to the given destination file.
 
       :param str filename: database file to serve as destination for the backup.
-      :param kwargs: forwarded to :meth:`~cysqlite.Connection.backup_to_file`.
+      :param kwargs: forwarded to :meth:`Connection.backup_to_file`.
 
    .. method:: checkpoint(**kwargs)
       :async:
 
       Perform a WAL checkpoint.
 
-      :param kwargs: forwarded to :meth:`~cysqlite.Connection.checkpoint`.
+      :param kwargs: forwarded to :meth:`Connection.checkpoint`.
       :return: tuple of ``(wal_size, checkpointed_pages)``.
       :rtype: tuple
 
@@ -456,7 +456,7 @@ AsyncCursor
 
 .. class:: AsyncCursor(conn, cursor)
 
-   Async wrapper around a synchronous :class:`~cysqlite.Cursor`. Returned by
+   Async wrapper around a synchronous :class:`Cursor`. Returned by
    :meth:`AsyncConnection.execute`.
 
    .. method:: fetchone()
