@@ -3559,6 +3559,7 @@ class TestPool(unittest.TestCase):
 
 
 from cysqlite.aio import connect as aconnect
+from cysqlite.aio import Pool as APool
 
 
 class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
@@ -3934,6 +3935,77 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
                                                 (i,))
         results = await asyncio.gather(*[read(i) for i in range(100)])
         self.assertEqual(results, list(range(100)))
+
+
+class TestAIOPool(unittest.IsolatedAsyncioTestCase):
+    filename = '/tmp/cysqlite.db'
+
+    async def asyncSetUp(self):
+        self.pool = APool('/tmp/cysqlite.db', pragmas={'cache_size': -4000})
+
+    async def asyncTearDown(self):
+        await self.pool.close()
+        self.cleanup()
+
+    def cleanup(self):
+        for filename in glob.glob(self.filename.replace('.db', '*')):
+            if os.path.isfile(filename):
+                os.unlink(filename)
+
+    async def test_pool_pragmas(self):
+        for factory in (self.pool.reader, self.pool.writer):
+            async with factory() as conn:
+                self.assertEqual(conn.conn.database, self.filename)
+                self.assertEqual(await conn.pragma('cache_size'), -4000)
+                self.assertEqual(await conn.pragma('journal_mode'), 'wal')
+
+    async def test_reader_read_only(self):
+        async with self.pool.reader() as conn:
+            self.assertEqual(await conn.execute_scalar('select 1'), 1)
+            with self.assertRaises(OperationalError):
+                await conn.pragma('application_id', 1337)
+            with self.assertRaises(OperationalError):
+                await conn.execute('create table g(k)')
+
+    async def test_writer(self):
+        async with self.pool.writer() as conn:
+            await conn.execute('create table g(k)')
+            await conn.execute('insert into g(k) values (?), (?)',
+                               ('k1', 'k2'))
+            res = await conn.execute('select * from g order by k')
+            self.assertEqual(await res.fetchall(), [('k1',), ('k2',)])
+
+    async def test_writer_lock(self):
+        async with self.pool.writer() as conn:
+            await conn.execute('create table g(k)')
+        async def t(n):
+            async with self.pool.writer() as conn:
+                async with conn.atomic() as tx:
+                    for i in range(n):
+                        await conn.execute('insert into g(k) values(?)', (i,))
+
+        await asyncio.gather(*[t(10) for i in range(8)])
+
+        async with self.pool.reader() as conn:
+            count = await conn.execute_scalar('select count(*) from g')
+            self.assertEqual(count, 80)
+
+    async def test_closed(self):
+        await self.pool.close()
+        with self.assertRaises(InterfaceError):
+            async with self.pool.reader() as conn:
+                pass
+        with self.assertRaises(InterfaceError):
+            async with self.pool.writer() as conn:
+                pass
+
+    async def test_no_writer(self):
+        pool = APool(':memory:', writer=False)
+        with self.assertRaises(InterfaceError):
+            async with pool.writer() as conn:
+                pass
+
+        await pool.close()
 
 
 if __name__ == '__main__':

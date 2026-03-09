@@ -36,9 +36,6 @@ class Pool(object):
     def __init__(self, database, readers=4, writer=True, **connect_kwargs):
         self.database = database
         self._connect_kwargs = connect_kwargs
-        self._readers = queue.SimpleQueue()
-        self._writer_lock = threading.Lock()
-        self._writer = None
         self._closed = False
 
         # Apply overrides.
@@ -46,6 +43,13 @@ class Pool(object):
         pragmas = connect_kwargs.setdefault('pragmas', {})
         for key, value in self.default_pragmas.items():
             pragmas.setdefault(key, value)
+
+        self.initialize_pool(readers, writer)
+
+    def initialize_pool(self, readers, writer):
+        self._readers = queue.SimpleQueue()
+        self._writer_lock = threading.Lock()
+        self._writer = None
 
         if writer:
             self._writer = self._connect(read_only=False)
@@ -62,21 +66,23 @@ class Pool(object):
         conn = connect(self.database, flags=flags, **self._connect_kwargs)
         return conn
 
-    def reader(self):
+    def _check_closed(self):
         if self._closed:
             raise InterfaceError('Pool is closed')
+
+    def reader(self):
+        self._check_closed()
         return _Reader(self)
 
     def writer(self):
-        if self._closed:
-            raise InterfaceError('Pool is closed')
+        self._check_closed()
         if self._writer is None:
             raise InterfaceError('Pool writer connection disabled.')
         return _Writer(self)
 
     def close(self):
         self._closed = True
-        if self._writer:
+        if self._writer is not None:
             self._writer.close()
             self._writer = None
         while not self._readers.empty():
