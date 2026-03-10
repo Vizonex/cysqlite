@@ -190,6 +190,11 @@ class AsyncCursor:
                 raise StopAsyncIteration
         return self._buffer.popleft()
 
+    async def close(self):
+        if self._cursor is not None:
+            cursor, self._cursor = self._cursor, None
+            await self.conn._submit(cursor.close)
+
 
 class _AsyncTransactionWrapper(object):
     def __init__(self, conn, *args):

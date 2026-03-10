@@ -3719,6 +3719,25 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accum[0], ('k003',))
         self.assertEqual(accum[-1], ('k249',))
 
+    async def test_cursor_close(self):
+        await self.create_data(250)
+
+        curs = await self.db.execute('select k from t order by k')
+        res = await curs.fetchmany(10)
+        self.assertEqual(len(res), 10)
+
+        # Create & Insert + our SELECT.
+        self.assertEqual(self.db.conn.get_stmt_usage(), (2, 1))
+        await curs.close()
+
+        self.assertEqual(self.db.conn.get_stmt_usage(), (3, 0))
+
+        curs = await self.db.execute('select k from t order by k')
+        self.assertEqual(self.db.conn.get_stmt_usage(), (2, 1))
+        self.assertEqual(len(await curs.fetchall()), 250)
+
+        self.assertEqual(self.db.conn.get_stmt_usage(), (3, 0))
+
     async def test_cursor_attributes(self):
         await self.db.execute('create table t(alpha, beta, gamma)')
         curs = await self.db.execute('select alpha, gamma from t')
