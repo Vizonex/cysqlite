@@ -1891,6 +1891,22 @@ Cursor
          print(curs.fetchone())  # (1,)
          print(curs.fetchone())  # None
 
+   .. method:: fetchmany(size)
+
+      Fetch up to ``size`` rows from the query result set. By default rows are
+      returned as ``tuple``, but row type can be controlled by setting
+      :attr:`Connection.row_factory`.
+
+      If no results are available or cursor has been consumed returns ``[]``.
+
+      Example:
+
+      .. code-block:: python
+
+         curs = db.execute('select 1 union select 2')
+         print(curs.fetchmany(10))  # [(1,), (2,)]
+         print(curs.fetchmany(10))  # []
+
    .. method:: fetchall()
 
       Fetch all rows from the query result set. By default rows are returned as
@@ -1903,8 +1919,8 @@ Cursor
 
       .. code-block:: python
 
-         curs = db.execute('select 1')
-         print(curs.fetchall())  # [(1,)]
+         curs = db.execute('select 1 union select 2')
+         print(curs.fetchall())  # [(1,), (2,)]
          print(curs.fetchall())  # []
 
    .. method:: scalar()

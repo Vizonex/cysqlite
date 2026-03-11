@@ -457,6 +457,43 @@ class TestCheckConnection(BaseTestCase):
 class TestExecute(BaseTestCase):
     filename = ':memory:'
 
+    def test_fetch_rows(self):
+        self.db.execute('create table g (k)')
+
+        curs = self.db.execute('select * from g')
+        self.assertIsNone(curs.fetchone())
+
+        curs = self.db.execute('select * from g')
+        self.assertEqual(curs.fetchmany(10), [])
+        self.assertEqual(curs.fetchmany(0), [])
+
+        curs = self.db.execute('select * from g')
+        self.assertEqual(curs.fetchall(), [])
+
+        self.db.executemany('insert into g (k) values (?)',
+                            [(f'k{i:02d}',) for i in range(10)])
+
+        curs = self.db.execute('select * from g order by k')
+        self.assertEqual(curs.fetchone(), ('k00',))
+        self.assertEqual(curs.fetchmany(4),
+                         [('k01',), ('k02',), ('k03',), ('k04',)])
+        self.assertEqual(curs.fetchmany(2), [('k05',), ('k06',)])
+        self.assertEqual(curs.fetchone(), ('k07',))
+        self.assertEqual(curs.fetchmany(4), [('k08',), ('k09',)])
+
+        self.assertIsNone(curs.fetchone())
+        self.assertEqual(curs.fetchmany(10), [])
+        self.assertEqual(curs.fetchall(), [])
+
+        curs = self.db.execute('select * from g order by k limit 3')
+        self.assertEqual(curs.fetchmany(100), [('k00',), ('k01',), ('k02',)])
+        self.assertEqual(curs.fetchmany(100), [])
+        self.assertEqual(curs.fetchmany(0), [])
+
+        curs = self.db.execute('select * from g order by k limit 3')
+        self.assertEqual(curs.fetchall(), [('k00',), ('k01',), ('k02',)])
+        self.assertEqual(curs.fetchall(), [])
+
     def test_cursor_attributes(self):
         self.db.execute('create table g (k, v)')
         curs = self.db.execute('insert into g (k, v) values (?, ?), (?, ?)',

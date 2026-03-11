@@ -763,6 +763,15 @@ cdef class Cursor(object):
         except StopIteration:
             return
 
+    cpdef fetchmany(self, size):
+        accum = []
+        try:
+            for i in range(size):
+                accum.append(self.__next__())
+        except StopIteration:
+            pass
+        return accum
+
     cpdef fetchall(self):
         return list(self)
 
