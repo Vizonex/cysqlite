@@ -170,13 +170,7 @@ class AsyncCursor:
 
     async def fetchmany(self, size=100, constructor=list):
         def _fetch():
-            rows = constructor()
-            for _ in range(size):
-                try:
-                    rows.append(self._cursor.__next__())
-                except StopIteration:
-                    break
-            return rows
+            return constructor(self._cursor.fetchmany(size))
         return await self.conn._submit(_fetch)
 
     def __aiter__(self):
