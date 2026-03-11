@@ -168,9 +168,12 @@ class AsyncCursor:
     def __aiter__(self):
         return self
 
-    async def fetchmany(self, size=100, constructor=list):
+    async def fetchmany(self, size=100, constructor=None):
         def _fetch():
-            return constructor(self._cursor.fetchmany(size))
+            res = self._cursor.fetchmany(size)
+            if constructor is not None:
+                res = constructor(res)
+            return res
         return await self.conn._submit(_fetch)
 
     def __aiter__(self):
