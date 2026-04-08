@@ -84,6 +84,7 @@ cdef class Row(object)
 cdef class Transaction(object)
 cdef class Savepoint(object)
 cdef class Blob(object)
+cdef class _TableFunctionImpl(object)
 
 
 SENTINEL = object()
@@ -573,10 +574,14 @@ cdef class Cursor(object):
         self.lastrowid = None
 
         self.stmt = self.conn.stmt_get(sql)
-        if params is not None:
-            self.stmt.bind(params)
-        else:
-            self.stmt.bind(())
+        try:
+            if params is not None:
+                self.stmt.bind(params)
+            else:
+                self.stmt.bind(())
+        except Exception:
+            self.finish()
+            raise
 
         self.step_status = self.stmt.step()
         if self.step_status == SQLITE_ROW:
@@ -749,6 +754,7 @@ cdef class Cursor(object):
     cdef abort(self):
         if self.stmt is not None:
             self.stmt.reset()
+            self.conn.stmt_in_use.pop(id(self.stmt), None)
             self.stmt.finalize()
             self.stmt = None
 
@@ -806,6 +812,7 @@ cdef class Connection(_callable_context_manager):
         public dict pragmas
 
         # List of statements, transactions, savepoints, blob handles?
+        bytes _main_db_name
         dict converters  # SQLite decltype -> converter(value).
         dict adapters  # Python type -> adapter(value).
         dict functions  # name -> fn.
@@ -1610,7 +1617,8 @@ cdef class Connection(_callable_context_manager):
 
     def set_main_db_name(self, name):
         check_connection(self)
-        cdef bytes bname = encode(name)
+        self._main_db_name = encode(name)  # SQLite does not copy, keep ours.
+        cdef bytes bname = self._main_db_name
         if sqlite3_db_config(self.db, SQLITE_DBCONFIG_MAINDBNAME,
                              <const char *>bname) != SQLITE_OK:
             raise_sqlite_error(self.db, 'error setting main db name: ')
@@ -2645,6 +2653,7 @@ cdef int cyConnect(sqlite3 *db, void *pAux, int argc, const char *const*argv,
         int rc
         object table_func_cls
         cysqlite_vtab *pNew = <cysqlite_vtab *>0
+        _TableFunctionImpl impl
         bytes schema
         bytes err
 
@@ -2652,7 +2661,8 @@ cdef int cyConnect(sqlite3 *db, void *pAux, int argc, const char *const*argv,
         pzErr[0] = sqlite3_mprintf('Missing table function class')
         return SQLITE_ERROR
 
-    table_func_cls = <object>pAux
+    impl = <_TableFunctionImpl>pAux
+    table_func_cls = impl.table_function
     try:
         schema = encode('CREATE TABLE x(%s);' %
                         table_func_cls.get_table_columns_declaration())
@@ -3027,6 +3037,10 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
     return SQLITE_OK
 
 
+cdef void cyDestroy(void *pAux) noexcept with gil:
+    Py_DECREF(<_TableFunctionImpl>pAux)
+
+
 cdef class _TableFunctionImpl(object):
     cdef:
         sqlite3_module module
@@ -3068,11 +3082,12 @@ cdef class _TableFunctionImpl(object):
         self.module.xRename = NULL
 
         # Create the SQLite virtual table.
-        rc = sqlite3_create_module(
+        rc = sqlite3_create_module_v2(
             db,
             <const char *>name,
             &self.module,
-            <void *>(self.table_function))
+            <void *>self,
+            cyDestroy)
         if rc != SQLITE_OK:
             return False
 

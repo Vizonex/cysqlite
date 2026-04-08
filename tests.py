@@ -262,6 +262,14 @@ class TestConnection(BaseTestCase):
         dbs = self.db.database_list()
         self.assertEqual(dbs[0][0], 'main')
 
+    def test_set_main_db_name_ptr(self):
+        import gc
+        self.db.set_main_db_name('app')
+        gc.collect()
+
+        dbs = self.db.database_list()
+        self.assertEqual(dbs[0][0], 'app')
+
     def test_file_control(self):
         result = self.db.file_control(SQLITE_FCNTL_DATA_VERSION, 0)
         self.assertTrue(result >= 0)
@@ -619,6 +627,27 @@ class TestExecute(BaseTestCase):
         curs = self.db.executemany('insert into kv(key, value, extra) '
                                    'values (?, ?, ?)', None)
         self.assertCount(0)
+
+    def test_executemany_bind_error(self):
+        self.create_table()
+        cursor = self.db.cursor()
+        _, in_use_before = self.db.get_stmt_usage()
+
+        params = [
+            ('a', 'b', 1),
+            ('c',),  # Wrong number of params, will fail on bind.
+        ]
+        with self.assertRaises(OperationalError):
+            cursor.executemany(
+                'INSERT INTO kv (key, value, extra) VALUES (?, ?, ?)',
+                params)
+
+        # Re-execute to trigger overwrite of self.stmt.
+        cursor.execute('SELECT 1')
+        cursor.close()
+
+        _, in_use_after = self.db.get_stmt_usage()
+        self.assertEqual(in_use_after, in_use_before)
 
     def test_executescript(self):
         self.db.executescript("""
@@ -1671,6 +1700,30 @@ class TestTransactions(BaseTestCase):
         self.assertCount(1)
         self.assertEqual(self.db.execute('select key from kv').scalar(), 'k4')
 
+    def test_savepoint_released_after_rollback(self):
+        with self.db.transaction():
+            for i in range(100):
+                try:
+                    with self.db.savepoint():
+                        self.db.execute(
+                            'INSERT INTO kv (key, value) VALUES (?, ?)',
+                            (f'k{i}', f'v{i}'))
+                        raise ValueError('force rollback')
+                except ValueError:
+                    pass
+
+            # Table should be empty — all savepoints rolled back.
+            self.assertCount(0)
+
+            # The real test: if savepoints weren't released, SQLite's
+            # internal savepoint stack has 50 entries. Verify we can still
+            # create and use new savepoints without issue, and that
+            # PRAGMA compile-time savepoint limits aren't hit.
+            with self.db.savepoint():
+                self.db.execute(
+                    'INSERT INTO kv (key, value) VALUES (?, ?)', ('ok', 'ok'))
+        self.assertCount(1)
+
 
 class TestUserDefinedCallbacks(BaseTestCase):
     filename = ':memory:'
@@ -2542,6 +2595,42 @@ class TestStatementUsage(BaseTestCase):
         curs2 = self.db.execute('select evil(k) from g')
         self.assertEqual(list(curs2), [('k2',), ('k3',), (None,)])
 
+    def test_stmt_leak_on_bind_error(self):
+        self.create_table()
+        cursor = self.db.cursor()
+
+        cursor.execute('SELECT * FROM kv WHERE id = ?', (1,))
+        cursor.close()
+
+        avail_before, in_use_before = self.db.get_stmt_usage()
+
+        cursor = self.db.cursor()
+        # bind() will fail due to wrong number of params.
+        with self.assertRaises(OperationalError):
+            cursor.execute('SELECT * FROM kv WHERE id = ?', (1, 2))
+
+        cursor.execute('SELECT 1')
+        cursor.close()
+
+        avail_after, in_use_after = self.db.get_stmt_usage()
+        # No leaked statements.
+        self.assertEqual(in_use_after, in_use_before,
+                         'Statement leaked in stmt_in_use after bind error')
+
+    def test_abort_leaks_stmt_in_use(self):
+        self.create_table()
+        _, in_use_before = self.db.get_stmt_usage()
+
+        cursor = self.db.cursor()
+        # Force a step error: insert a duplicate primary key.
+        self.db.execute('INSERT INTO kv (id, key, value) VALUES (1, "a", "b")')
+        with self.assertRaises(IntegrityError):
+            cursor.execute('INSERT INTO kv (id, key, value) VALUES (1, "c", "d")')
+
+        _, in_use_after = self.db.get_stmt_usage()
+        self.assertEqual(in_use_after, in_use_before,
+                         'Finalized statement leaked in stmt_in_use after abort')
+
 
 class TestBlob(BaseTestCase):
     def setUp(self):
@@ -3324,6 +3413,40 @@ class TestTableFunction(BaseTestCase):
 
         curs = self.execute('SELECT * FROM somewhat_broken(0, 2)')
         self.assertEqual(list(curs), [(0,), (1,), (2,)])
+
+    def test_table_func_impl_released_on_close(self):
+        import gc
+        import weakref
+
+        # Create the class dynamically so we control all references to it.
+        MyFunc = type('MyFunc', (TableFunction,), {
+            'columns': [('val', 'TEXT')],
+            'params': ['seed'],
+            'name': 'my_leak_test',
+            'initialize': lambda self, seed=None: setattr(self, '_v', seed),
+            'iterate': lambda self, idx: (_ for _ in ()).throw(StopIteration)
+                       if idx > 0 else (self._v,),
+        })
+
+        MyFunc.register(self.db)
+        ref = weakref.ref(MyFunc)
+
+        # Drop reference to the class.
+        del MyFunc
+        gc.collect()
+
+        # Class must still be alive as the module is in use.
+        self.assertIsNotNone(ref())
+
+        # Close the connection. xDestroy fires and DECREFs the
+        # _TableFunctionImpl, releasing the class.
+        self.db.close()
+        gc.collect()
+
+        # Reference should be dead since the module is no longer alive.
+        self.assertIsNone(ref(),
+                          '_TableFunctionImpl leaked: table function class '
+                          'still alive after connection closed')
 
 
 class TestRankUDFs(BaseTestCase):
