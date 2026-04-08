@@ -1295,32 +1295,28 @@ cdef class Connection(_callable_context_manager):
         if backup == NULL:
             raise_sqlite_error(dest.db, 'error initializing backup: ')
 
-        while True:
+        try:
+            while True:
+                check_connection(self)
+                with nogil:
+                    rc = sqlite3_backup_step(backup, page_step)
+
+                if progress is not None:
+                    remaining = sqlite3_backup_remaining(backup)
+                    page_count = sqlite3_backup_pagecount(backup)
+                    progress(remaining, page_count, rc == SQLITE_DONE)
+
+                if rc == SQLITE_BUSY or rc == SQLITE_LOCKED:
+                    with nogil:
+                        sqlite3_sleep(250)
+                elif rc == SQLITE_DONE:
+                    break
+                elif rc != SQLITE_OK:
+                    raise_sqlite_error(dest.db, 'error backing up database: ')
+        finally:
             check_connection(self)
             with nogil:
-                rc = sqlite3_backup_step(backup, page_step)
-
-            if progress is not None:
-                remaining = sqlite3_backup_remaining(backup)
-                page_count = sqlite3_backup_pagecount(backup)
-                try:
-                    progress(remaining, page_count, rc == SQLITE_DONE)
-                except (ValueError, TypeError, KeyboardInterrupt) as exc:
-                    sqlite3_backup_finish(backup)
-                    raise
-
-            if rc == SQLITE_BUSY or rc == SQLITE_LOCKED:
-                with nogil:
-                    sqlite3_sleep(250)
-            elif rc == SQLITE_DONE:
-                break
-            elif rc != SQLITE_OK:
-                sqlite3_backup_finish(backup)
-                raise_sqlite_error(dest.db, 'error backing up database: ')
-
-        check_connection(self)
-        with nogil:
-            rc = sqlite3_backup_finish(backup)
+                rc = sqlite3_backup_finish(backup)
 
         if rc != SQLITE_OK:
             raise_sqlite_error(dest.db, 'error backing up database: ')
@@ -2890,6 +2886,10 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
         return SQLITE_ERROR
 
     # Get first row of data.
+    if pCur.row_data != NULL:
+        Py_DECREF(<tuple>pCur.row_data)
+        pCur.row_data = NULL
+
     pCur.stopped = False
     try:
         row_data = tuple(table_func.iterate(0))

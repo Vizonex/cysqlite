@@ -3045,12 +3045,13 @@ class Series(TableFunction):
 
     def initialize(self, start=0, stop=None, step=1):
         self.start = start
-        self.stop = stop or float('inf')
+        self.stop = stop if stop is not None else float('inf')
         self.step = step
         self.curr = self.start
 
     def iterate(self, idx):
-        if self.curr > self.stop:
+        if ((self.step > 0 and self.curr > self.stop) or
+            (self.step < 0 and self.curr < self.stop)):
             raise StopIteration
 
         ret = self.curr
@@ -3447,6 +3448,24 @@ class TestTableFunction(BaseTestCase):
         self.assertIsNone(ref(),
                           '_TableFunctionImpl leaked: table function class '
                           'still alive after connection closed')
+
+    def test_vtab_refilter_no_leak(self):
+        Series.register(self.db)
+
+        self.db.execute('create table t (n integer)')
+        self.db.executemany('insert into t values (?)',
+                            [(i,) for i in range(5)])
+
+        # A correlated subquery forces SQLite to call xFilter on the
+        # inner cursor once per outer row, re-filtering the same cursor.
+        rows = list(self.db.execute(
+            'select t.n, s.value from t, series(0, t.n, 1) as s'))
+
+        expected = []
+        for n in range(5):
+            for v in range(n + 1):
+                expected.append((n, v))
+        self.assertEqual(sorted(rows), sorted(expected))
 
 
 class TestRankUDFs(BaseTestCase):
