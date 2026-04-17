@@ -106,6 +106,12 @@ class BaseTestCase(unittest.TestCase):
             self.assertTrue(isinstance(exc, exc_type))
         self.assertIn(msg, exc.args[0])
 
+    def assertCausedBy(self, exc, msg, exc_type):
+        cause = exc.__cause__
+        self.assertIsNotNone(cause, 'expected __cause__, got None')
+        self.assertIsInstance(cause, exc_type)
+        self.assertIn(msg, cause.args[0])
+
 
 class TestModule(BaseTestCase):
     def test_module_constants(self):
@@ -1001,7 +1007,9 @@ class TestQueryExecution(BaseTestCase):
         self.assertEqual(curs2.fetchall(),
                          [('k1', 'v1xz'), ('k2', 'v2'), ('k3', 'v3')])
 
-        self.assertEqual(curs.rowcount, 1)
+        # curs was drained via fetchall above; rowcount now reflects the
+        # full 3 rows processed by the INSERT ... ON CONFLICT DO UPDATE.
+        self.assertEqual(curs.rowcount, 3)
         self.assertEqual(list(curs), [])  # No results.
 
         # Now try an INSERT / ON CONFLICT DO NOTHING.
@@ -1028,6 +1036,89 @@ class TestQueryExecution(BaseTestCase):
                 inner.append(key_i)
         self.assertEqual(outer, ['k1'])
         self.assertEqual(inner, ['k2', 'k3'])
+
+
+class TestReturningRowcount(BaseTestCase):
+    filename = ':memory:'
+
+    # Invariant: after a DML+RETURNING cursor is drained, rowcount equals
+    # the total affected-row count. The pre-drain value is implementation-
+    # defined and intentionally not asserted on.
+    def test_insert_returning_final_after_drain(self):
+        self.db.execute('create table k (v)')
+        curs = self.db.execute(
+            'insert into k (v) values (?), (?), (?) returning v',
+            ('a', 'b', 'c'))
+        curs.fetchall()
+        self.assertEqual(curs.rowcount, 3)
+
+    def test_delete_returning_final_after_drain(self):
+        self.db.execute('create table k (id integer primary key, v)')
+        self.db.executemany('insert into k(v) values (?)',
+                            [('a',), ('b',), ('c',), ('d',)])
+        curs = self.db.execute(
+            'delete from k where v in (?, ?) returning v', ('b', 'd'))
+        curs.fetchall()
+        self.assertEqual(curs.rowcount, 2)
+
+    def test_update_returning_final_after_drain(self):
+        self.db.execute('create table k (id integer primary key, v integer)')
+        self.db.executemany('insert into k(v) values (?)',
+                            [(1,), (2,), (3,), (4,), (5,)])
+        curs = self.db.execute(
+            'update k set v = v * 10 where v > ? returning v', (2,))
+        curs.fetchall()
+        self.assertEqual(curs.rowcount, 3)  # rows with v in {3,4,5}
+
+    def test_upsert_returning_final_after_drain(self):
+        # INSERT ON CONFLICT DO UPDATE RETURNING, rowcount used to read 1
+        # instead of 3.
+        self.db.execute('create table k (key text primary key, v text)')
+        self.db.execute('insert into k values (?, ?)', ('k1', 'v1'))
+        curs = self.db.execute(
+            'insert into k (key, v) values (?,?), (?,?), (?,?) '
+            'on conflict do update set v = v || excluded.v '
+            'returning key, v',
+            ('k1', 'x', 'k2', 'y', 'k1', 'z'))
+        curs.fetchall()
+        self.assertEqual(curs.rowcount, 3)
+
+    def test_returning_drain_via_iterator(self):
+        # Iteration also finalizes rowcount.
+        self.db.execute('create table k (key text primary key, v text)')
+        self.db.execute('insert into k values (?, ?)', ('k1', 'v1'))
+        curs = self.db.execute(
+            'insert into k (key, v) values (?,?), (?,?), (?,?) '
+            'on conflict do update set v = v || excluded.v '
+            'returning key',
+            ('k1', 'x', 'k2', 'y', 'k1', 'z'))
+        for _ in curs:
+            pass
+        self.assertEqual(curs.rowcount, 3)
+
+    def test_returning_drain_via_fetchmany(self):
+        self.db.execute('create table k (v)')
+        curs = self.db.execute(
+            'insert into k (v) values (?),(?),(?),(?),(?) returning v',
+            ('a', 'b', 'c', 'd', 'e'))
+        while curs.fetchmany(2):
+            pass
+        self.assertEqual(curs.rowcount, 5)
+
+    # Regression: the patch must not disturb the common non-RETURNING path,
+    # where rowcount is captured once at execute() and is already final.
+    def test_non_returning_dml_unchanged(self):
+        self.db.execute('create table k (v)')
+
+        curs = self.db.execute('insert into k(v) values (?),(?),(?)',
+                               ('a', 'b', 'c'))
+        self.assertEqual(curs.rowcount, 3)
+
+        curs = self.db.execute('update k set v = v || ?', ('!',))
+        self.assertEqual(curs.rowcount, 3)
+
+        curs = self.db.execute('delete from k where v like ?', ('%!',))
+        self.assertEqual(curs.rowcount, 3)
 
 
 class TestQueryTypes(BaseTestCase):
@@ -1755,14 +1846,14 @@ class TestUserDefinedCallbacks(BaseTestCase):
             ('k3', 'v3z')])
 
         self.assertTrue(self.db.callback_error is None)
-        self.assertRaises(
-            OperationalError,
-            self.db.execute,
-            'select reverse(1)')
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select reverse(1)')
 
-        self.assertTrue(isinstance(self.db.callback_error, TypeError))
+        # Original Python exception is chained as __cause__.
+        self.assertCausedBy(ctx.exception, '', TypeError)
 
-        # Verify callback error is cleared after reading once.
+        # callback_error was consumed by raise_sqlite_error; reading it
+        # here returns None.
         self.assertTrue(self.db.callback_error is None)
 
     def test_create_function_multiple(self):
@@ -1780,8 +1871,9 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.assertEqual(run('a', 'bc'), 'abc')
 
         self.assertTrue(self.db.callback_error is None)
-        self.assertRaises(OperationalError, lambda: run(None, 1))
-        self.assertTrue(isinstance(self.db.callback_error, TypeError))
+        with self.assertRaises(OperationalError) as ctx:
+            run(None, 1)
+        self.assertTrue(isinstance(ctx.exception.__cause__, TypeError))
 
         # These are raised by Sqlite since we passed wrong num parameters.
         self.assertRaises(OperationalError, lambda: run(1))
@@ -1846,10 +1938,9 @@ class TestUserDefinedCallbacks(BaseTestCase):
                 raise ValueError('broken init')
 
         self.db.create_aggregate(BrokenInit, 'broken_init', 1)
-        self.assertRaises(OperationalError, self.db.execute,
-                          'select broken_init(extra) from kv')
-
-        self.assertCallbackError('broken init', ValueError)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select broken_init(extra) from kv')
+        self.assertCausedBy(ctx.exception, 'broken init', ValueError)
 
     def test_aggregate_broken_step(self):
         class BrokenStep(object):
@@ -1861,9 +1952,9 @@ class TestUserDefinedCallbacks(BaseTestCase):
                 return 0
 
         self.db.create_aggregate(BrokenStep, 'broken_step', 1)
-        self.assertRaises(OperationalError, self.db.execute,
-                          'select broken_step(extra) from kv')
-        self.assertCallbackError('broken step', ValueError)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select broken_step(extra) from kv')
+        self.assertCausedBy(ctx.exception, 'broken step', ValueError)
 
     def test_aggregate_broken_finalize(self):
         class BrokenFinalize(object):
@@ -1874,9 +1965,9 @@ class TestUserDefinedCallbacks(BaseTestCase):
                 return 0
 
         self.db.create_aggregate(BrokenFinalize, 'broken_finalize', 1)
-        self.assertRaises(OperationalError, self.db.execute,
-                          'select broken_finalize(extra) from kv')
-        self.assertCallbackError('broken finalize', ValueError)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select broken_finalize(extra) from kv')
+        self.assertCausedBy(ctx.exception, 'broken finalize', ValueError)
 
     def test_create_window_function(self):
         class Sum(object):
@@ -1931,14 +2022,14 @@ class TestUserDefinedCallbacks(BaseTestCase):
         )
         for agg, name in pairs:
             self.db.create_window_function(agg, name, 1)
-            with self.assertRaises(OperationalError):
+            with self.assertRaises(OperationalError) as ctx:
                 curs = self.db.execute('select key, extra, %s(extra) over ('
                                        'order by id rows between '
                                        '1 preceding and 1 following) '
                                        'from kv order by key, extra' % name)
                 curs.fetchall()
 
-            self.assertCallbackError(name, ValueError)
+            self.assertCausedBy(ctx.exception, name, ValueError)
 
     def test_create_collation(self):
         def case_insensitive(s1, s2):
@@ -2016,10 +2107,10 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.db.execute('delete from kv')
         self.assertCount(0)
         self.assertFalse(self.db.autocommit())
-        with self.assertRaises(IntegrityError):
+        with self.assertRaises(IntegrityError) as ctx:
             self.db.commit()
 
-        self.assertCallbackError('fail', TypeError)
+        self.assertCausedBy(ctx.exception, 'fail', TypeError)
 
         self.assertTrue(self.db.autocommit())
         self.assertCount(3)
@@ -2139,10 +2230,10 @@ class TestUserDefinedCallbacks(BaseTestCase):
             'drop table kv',
         ]
         for query in queries:
-            with self.assertRaises(OperationalError):
+            with self.assertRaises(OperationalError) as ctx:
                 self.db.execute(query)
 
-            self.assertCallbackError('fail', ValueError)
+            self.assertCausedBy(ctx.exception, 'fail', ValueError)
 
         self.db.authorizer(None)  # Clear authorizer to verify no changes.
         self.assertCount(3)

@@ -2774,8 +2774,6 @@ exception hierarchy.
    Exception raised for errors that are related to the database interface
    rather than the database itself.
 
-   *Currently not used.*
-
 .. class:: DatabaseError
 
    Exception raised for errors that are related to the database. The following
@@ -2818,6 +2816,28 @@ exception hierarchy.
    supported by the database.
 
    *Currently not used.*
+
+IntegrityError Subclasses
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. class:: UniqueIntegrityError
+           NotNullIntegrityError
+           ForeignKeyIntegrityError
+           CheckIntegrityError
+           PrimaryKeyIntegrityError
+
+OperationalError Subclasses
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. class:: DiskFullError
+           ReadOnlyError
+           DatabaseLockedError
+           AuthorizationError
+
+DatabaseError Subclasses
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. class:: DatabaseCorruptError
 
 
 Constants

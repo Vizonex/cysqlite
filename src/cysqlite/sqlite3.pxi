@@ -65,6 +65,12 @@ cdef extern from "sqlite3.h" nogil:
     cdef int SQLITE_ROW  # sqlite3_step() has another row ready
     cdef int SQLITE_DONE  # sqlite3_step() has finished executing
 
+    cdef int SQLITE_CONSTRAINT_CHECK
+    cdef int SQLITE_CONSTRAINT_FOREIGNKEY
+    cdef int SQLITE_CONSTRAINT_NOTNULL
+    cdef int SQLITE_CONSTRAINT_PRIMARYKEY
+    cdef int SQLITE_CONSTRAINT_UNIQUE
+
     cdef int SQLITE_OPEN_READONLY  # Ok for sqlite3_open_v2()
     cdef int SQLITE_OPEN_READWRITE  # Ok for sqlite3_open_v2()
     cdef int SQLITE_OPEN_CREATE  # Ok for sqlite3_open_v2()

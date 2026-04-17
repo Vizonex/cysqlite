@@ -51,10 +51,21 @@ import weakref
 
 from cysqlite._cysqlite cimport *
 from cysqlite.exceptions import (
-    OperationalError,
+    AuthorizationError,
+    CheckIntegrityError,
+    DatabaseCorruptError,
+    DatabaseLockedError,
+    DataError,
+    DiskFullError,
+    ForeignKeyIntegrityError,
     IntegrityError,
     InternalError,
-    ProgrammingError)
+    NotNullIntegrityError,
+    OperationalError,
+    PrimaryKeyIntegrityError,
+    ProgrammingError,
+    ReadOnlyError,
+    UniqueIntegrityError)
 from cysqlite.metadata import (
     ColumnMetadata,
     Column,
@@ -90,10 +101,22 @@ cdef class _TableFunctionImpl(object)
 SENTINEL = object()
 
 
-cdef raise_sqlite_error(sqlite3 *db, unicode msg):
+cdef raise_sqlite_error(Connection conn, unicode msg):
     cdef:
         int code = 0
         int ext = 0
+
+        sqlite3 *db = conn.db if conn is not None else NULL
+        object cause = None
+
+    # If a callback stashed an exception on the connection during this
+    # statement, consume it now and chain it as __cause__ on the raised
+    # exception. This gives callers the original Python failure site in
+    # the traceback while keeping the DB-API-typed exception on the
+    # outside for `except OperationalError:` / `except IntegrityError:`.
+    if conn is not None and conn._callback_error is not None:
+        cause = conn._callback_error
+        conn._callback_error = None
 
     if db != NULL:
         code = sqlite3_errcode(db)
@@ -103,19 +126,40 @@ cdef raise_sqlite_error(sqlite3 *db, unicode msg):
         errmsg = '(db handle is NULL)'
 
     if code == SQLITE_CONSTRAINT:
-        exc = IntegrityError
+        if ext == SQLITE_CONSTRAINT_UNIQUE:
+            exc = UniqueIntegrityError
+        elif ext == SQLITE_CONSTRAINT_NOTNULL:
+            exc = NotNullIntegrityError
+        elif ext == SQLITE_CONSTRAINT_FOREIGNKEY:
+            exc = ForeignKeyIntegrityError
+        elif ext == SQLITE_CONSTRAINT_CHECK:
+            exc = CheckIntegrityError
+        elif ext == SQLITE_CONSTRAINT_PRIMARYKEY:
+            exc = PrimaryKeyIntegrityError
+        else:
+            exc = IntegrityError
+    elif code in (SQLITE_RANGE, SQLITE_MISMATCH, SQLITE_TOOBIG):
+        exc = DataError
+    elif code == SQLITE_READONLY:
+        exc = ReadOnlyError
+    elif code == SQLITE_FULL:
+        exc = DiskFullError
+    elif code in (SQLITE_BUSY, SQLITE_LOCKED):
+        exc = DatabaseLockedError
+    elif code == SQLITE_AUTH:
+        exc = AuthorizationError
+    elif code in (SQLITE_CORRUPT, SQLITE_NOTADB):
+        exc = DatabaseCorruptError
     elif code == SQLITE_MISUSE:
         exc = ProgrammingError
     elif code == SQLITE_INTERNAL:
         exc = InternalError
     elif code == SQLITE_NOMEM:
         exc = MemoryError
-    elif code in (SQLITE_ABORT, SQLITE_INTERRUPT):
-        exc = OperationalError
     else:
         exc = OperationalError
 
-    raise exc(f"{msg}{errmsg} (code={code}, ext={ext})")
+    raise exc(f"{msg}{errmsg} (code={code}, ext={ext})") from cause
 
 
 cdef class _callable_context_manager(object):
@@ -268,7 +312,7 @@ cdef class Statement(object):
             if self.st:
                 sqlite3_finalize(self.st)
                 self.st = NULL
-            raise_sqlite_error(self.conn.db, 'error compiling statement: ')
+            raise_sqlite_error(self.conn, 'error compiling statement: ')
 
         if self.st == NULL:
             raise ProgrammingError('Empty SQL statement.')
@@ -397,7 +441,7 @@ cdef class Statement(object):
 
             if rc != SQLITE_OK:
                 sqlite3_clear_bindings(self.st)
-                raise_sqlite_error(self.conn.db, 'error binding parameter: ')
+                raise_sqlite_error(self.conn, 'error binding parameter: ')
 
         return 0
 
@@ -595,9 +639,13 @@ cdef class Cursor(object):
                 self.set_description()
         else:
             self.abort()
-            raise_sqlite_error(self.conn.db, 'error executing query: ')
+            raise_sqlite_error(self.conn, 'error executing query: ')
 
         if self.stmt.is_dml:
+            # sqlite3_changes() is reliable at SQLITE_DONE. For DML that
+            # returns rows (RETURNING), the count may be partial until the
+            # result set is drained, so it's refreshed on every step in
+            # _get_current_row().
             self.rowcount = self.conn.changes()
             self.lastrowid = self.conn.last_insert_rowid()
 
@@ -637,7 +685,7 @@ cdef class Cursor(object):
                 self.stmt.reset()
             else:
                 self.abort()
-                raise_sqlite_error(self.conn.db, 'error executing query: ')
+                raise_sqlite_error(self.conn, 'error executing query: ')
 
         self.lastrowid = self.conn.last_insert_rowid()
         self.finish()
@@ -672,7 +720,7 @@ cdef class Cursor(object):
                 rc = sqlite3_prepare_v2(self.conn.db, tail, -1, &st, &tail)
 
             if rc != SQLITE_OK:
-                raise_sqlite_error(self.conn.db, 'error executing query: ')
+                raise_sqlite_error(self.conn, 'error executing query: ')
 
             rc = SQLITE_ROW
             while rc == SQLITE_ROW:
@@ -689,13 +737,13 @@ cdef class Cursor(object):
                 # actually have an error.
                 code = sqlite3_errcode(self.conn.db)
                 if code != 0:
-                    raise_sqlite_error(self.conn.db, 'error executing query: ')
+                    raise_sqlite_error(self.conn, 'error executing query: ')
 
             if st != NULL:
                 with nogil:
                     rc = sqlite3_finalize(st)
                 if rc != SQLITE_OK:
-                    raise_sqlite_error(self.conn.db, 'error finalizing: ')
+                    raise_sqlite_error(self.conn, 'error finalizing: ')
 
             if tail[0] == 0:
                 break
@@ -719,12 +767,16 @@ cdef class Cursor(object):
                 row = self.stmt.get_row_data(self.row_converters)
             finally:
                 self.step_status = self.stmt.step()
+                # Keep rowcount current for DML+RETURNING so a drained
+                # cursor reports the final affected-row count.
+                if self.stmt.is_dml:
+                    self.rowcount = self.conn.changes()
         elif self.step_status == SQLITE_DONE:
             self.finish()
             raise StopIteration
         else:
             self.abort()
-            raise_sqlite_error(self.conn.db, 'error executing query: ')
+            raise_sqlite_error(self.conn, 'error executing query: ')
 
         return row
 
@@ -1106,7 +1158,7 @@ cdef class Connection(_callable_context_manager):
         else:
             stmt.finalize()
             self.stmt_in_use.pop(id(stmt), None)
-            raise_sqlite_error(self.db, 'error executing query: ')
+            raise_sqlite_error(self, 'error executing query: ')
 
     def begin(self, lock=None):
         if lock:
@@ -1151,7 +1203,7 @@ cdef class Connection(_callable_context_manager):
         cdef int current, highwater, rc
 
         if sqlite3_db_status(self.db, flag, &current, &highwater, 0):
-            raise_sqlite_error(self.db, 'error requesting db status: ')
+            raise_sqlite_error(self, 'error requesting db status: ')
         return (current, highwater)
 
     def pragma(self, key, value=SENTINEL, database=None, multi=False,
@@ -1255,7 +1307,7 @@ cdef class Connection(_callable_context_manager):
                                            &not_null, &primary_key,
                                            &auto_increment)
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error getting column metadata: ')
+            raise_sqlite_error(self, 'error getting column metadata: ')
 
         return ColumnMetadata(
             table,
@@ -1293,7 +1345,7 @@ cdef class Connection(_callable_context_manager):
 
         backup = sqlite3_backup_init(dest.db, bname, self.db, bsrcname)
         if backup == NULL:
-            raise_sqlite_error(dest.db, 'error initializing backup: ')
+            raise_sqlite_error(dest, 'error initializing backup: ')
 
         try:
             while True:
@@ -1312,14 +1364,14 @@ cdef class Connection(_callable_context_manager):
                 elif rc == SQLITE_DONE:
                     break
                 elif rc != SQLITE_OK:
-                    raise_sqlite_error(dest.db, 'error backing up database: ')
+                    raise_sqlite_error(dest, 'error backing up database: ')
         finally:
             check_connection(self)
             with nogil:
                 rc = sqlite3_backup_finish(backup)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(dest.db, 'error backing up database: ')
+            raise_sqlite_error(dest, 'error backing up database: ')
 
     def backup_to_file(self, filename, pages=None, name=None, progress=None,
                        src_name=None):
@@ -1405,7 +1457,7 @@ cdef class Connection(_callable_context_manager):
             NULL,
             NULL)
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error creating function: ')
+            raise_sqlite_error(self, 'error creating function: ')
 
     def create_aggregate(self, agg, name=None, nargs=-1, deterministic=True):
         check_connection(self)
@@ -1436,7 +1488,7 @@ cdef class Connection(_callable_context_manager):
             _finalize_cb)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error creating aggregate: ')
+            raise_sqlite_error(self, 'error creating aggregate: ')
 
     def create_window_function(self, agg, name=None, nargs=-1,
                                deterministic=True):
@@ -1470,7 +1522,7 @@ cdef class Connection(_callable_context_manager):
             NULL)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error creating aggregate: ')
+            raise_sqlite_error(self, 'error creating aggregate: ')
 
     def create_collation(self, fn, name=None):
         check_connection(self)
@@ -1494,7 +1546,7 @@ cdef class Connection(_callable_context_manager):
             _collation_cb)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error creating collation: ')
+            raise_sqlite_error(self, 'error creating collation: ')
 
     def commit_hook(self, fn):
         check_connection(self)
@@ -1543,7 +1595,7 @@ cdef class Connection(_callable_context_manager):
             rc = sqlite3_set_authorizer(self.db, _auth_cb, <void *>callback)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error setting authorizer: ')
+            raise_sqlite_error(self, 'error setting authorizer: ')
 
     def trace(self, fn, mask=2, expand_sql=True):
         check_connection(self)
@@ -1560,7 +1612,7 @@ cdef class Connection(_callable_context_manager):
             rc = sqlite3_trace_v2(self.db, mask, _trace_cb, <void *>callback)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error setting trace: ')
+            raise_sqlite_error(self, 'error setting trace: ')
 
     def progress(self, fn, n=1):
         check_connection(self)
@@ -1617,7 +1669,7 @@ cdef class Connection(_callable_context_manager):
         cdef bytes bname = self._main_db_name
         if sqlite3_db_config(self.db, SQLITE_DBCONFIG_MAINDBNAME,
                              <const char *>bname) != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error setting main db name: ')
+            raise_sqlite_error(self, 'error setting main db name: ')
 
     def db_config(self, op, setting=None):
         check_connection(self)
@@ -1628,7 +1680,7 @@ cdef class Connection(_callable_context_manager):
 
         rc = sqlite3_db_config(self.db, iop, isetting, &status)
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error setting config value: ')
+            raise_sqlite_error(self, 'error setting config value: ')
         return status
 
     def set_foreign_keys_enabled(self, int enabled):
@@ -1647,13 +1699,13 @@ cdef class Connection(_callable_context_manager):
         check_connection(self)
         cdef int rc = sqlite3_enable_shared_cache(enabled)
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error setting shared cache: ')
+            raise_sqlite_error(self, 'error setting shared cache: ')
         return enabled
 
     def set_autocheckpoint(self, int n):
         check_connection(self)
         if sqlite3_wal_autocheckpoint(self.db, n) != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error setting wal autocheckpoint: ')
+            raise_sqlite_error(self, 'error setting wal autocheckpoint: ')
 
     def checkpoint(self, full=False, truncate=False, restart=False, name=None):
         check_connection(self)
@@ -1684,7 +1736,7 @@ cdef class Connection(_callable_context_manager):
         if rc == SQLITE_MISUSE:
             raise OperationalError('error: misuse - cannot perform checkpoint')
         elif rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error performing checkpoint: ')
+            raise_sqlite_error(self, 'error performing checkpoint: ')
 
         return (pnLog, pnCkpt)
 
@@ -1711,7 +1763,7 @@ cdef class Connection(_callable_context_manager):
             rc = sqlite3_file_control(self.db, zDb, <int>op, &val)
 
         if rc != SQLITE_OK:
-            raise_sqlite_error(self.db, 'error in file control: ')
+            raise_sqlite_error(self, 'error in file control: ')
 
         return val
 
@@ -2245,7 +2297,7 @@ cdef class Blob(object):
 
         if rc != SQLITE_OK:
             raise_sqlite_error(
-                self.conn.db,
+                self.conn,
                 f'Unable to open blob "{table}"."{column}" row {rowid}: ')
         if blob == NULL:
             raise MemoryError('Unable to allocate blob.')
@@ -2274,7 +2326,7 @@ cdef class Blob(object):
         _check_blob(self)
         if sqlite3_blob_reopen(self.blob, <sqlite3_int64>rowid):
             self._close()
-            raise_sqlite_error(self.conn.db, 'unable to reopen blob: ')
+            raise_sqlite_error(self.conn, 'unable to reopen blob: ')
         self.offset = 0
 
     def __enter__(self):
@@ -2339,7 +2391,7 @@ cdef class Blob(object):
         p = PyBytes_AS_STRING(chunk)
         if sqlite3_blob_read(self.blob, p, limit, self.offset):
             self._close()
-            raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+            raise_sqlite_error(self.conn, 'error reading from blob: ')
 
         n_read = limit
         for i in range(limit):
@@ -2399,7 +2451,7 @@ cdef class Blob(object):
         buf = PyBytes_AS_STRING(pybuf)
         if sqlite3_blob_read(self.blob, buf, length, self.offset):
             self._close()
-            raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+            raise_sqlite_error(self.conn, 'error reading from blob: ')
 
         self.offset += length
         return pybuf
@@ -2424,7 +2476,7 @@ cdef class Blob(object):
         try:
             if sqlite3_blob_read(self.blob, view.buf, n_read, self.offset):
                 self._close()
-                raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+                raise_sqlite_error(self.conn, 'error reading from blob: ')
         finally:
             PyBuffer_Release(&view)
 
@@ -2471,7 +2523,7 @@ cdef class Blob(object):
                 raise ValueError('Data would go beyond end of blob.')
 
             if sqlite3_blob_write(self.blob, buf, n, self.offset):
-                raise_sqlite_error(self.conn.db, 'error writing to blob: ')
+                raise_sqlite_error(self.conn, 'error writing to blob: ')
         finally:
             if buffer_acquired:
                 PyBuffer_Release(&view)
@@ -2527,7 +2579,7 @@ cdef class Blob(object):
             p = PyBytes_AS_STRING(buf)
             if sqlite3_blob_read(self.blob, p, 1, idx):
                 self._close()
-                raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+                raise_sqlite_error(self.conn, 'error reading from blob: ')
             return <unsigned char>p[0]
 
         if not isinstance(key, slice):
@@ -2545,7 +2597,7 @@ cdef class Blob(object):
         p = PyBytes_AS_STRING(buf)
         if sqlite3_blob_read(self.blob, p, length, start):
             self._close()
-            raise_sqlite_error(self.conn.db, 'error reading from blob: ')
+            raise_sqlite_error(self.conn, 'error reading from blob: ')
         return buf
 
     def __setitem__(self, key, value):
@@ -2571,7 +2623,7 @@ cdef class Blob(object):
                     raise ValueError('byte must be in range(0, 256)')
                 byte_val = <unsigned char>value
                 if sqlite3_blob_write(self.blob, &byte_val, 1, idx):
-                    raise_sqlite_error(self.conn.db, 'error writing to blob: ')
+                    raise_sqlite_error(self.conn, 'error writing to blob: ')
             else:
                 if PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO):
                     raise TypeError(
@@ -2583,7 +2635,7 @@ cdef class Blob(object):
                             'blob index assignment requires a single byte, '
                             'got %d bytes' % view.len)
                     if sqlite3_blob_write(self.blob, view.buf, 1, idx):
-                        raise_sqlite_error(self.conn.db,
+                        raise_sqlite_error(self.conn,
                                            'error writing to blob: ')
                 finally:
                     PyBuffer_Release(&view)
@@ -2608,7 +2660,7 @@ cdef class Blob(object):
                     'buffer of length %d' % (length, view.len))
             if length > 0:
                 if sqlite3_blob_write(self.blob, view.buf, length, start):
-                    raise_sqlite_error(self.conn.db, 'error writing to blob: ')
+                    raise_sqlite_error(self.conn, 'error writing to blob: ')
         finally:
             PyBuffer_Release(&view)
 

@@ -11,3 +11,19 @@ class IntegrityError(DatabaseError): pass
 class InternalError(DatabaseError): pass
 class ProgrammingError(DatabaseError): pass
 class NotSupportedError(DatabaseError): pass
+
+# New subclasses — all still IntegrityError for back-compat.
+class UniqueIntegrityError(IntegrityError): pass
+class NotNullIntegrityError(IntegrityError): pass
+class ForeignKeyIntegrityError(IntegrityError): pass
+class CheckIntegrityError(IntegrityError): pass
+class PrimaryKeyIntegrityError(IntegrityError): pass
+
+# New subclasses for I/O-flavored OperationalErrors.
+class DiskFullError(OperationalError): pass
+class ReadOnlyError(OperationalError): pass
+class DatabaseLockedError(OperationalError): pass
+class AuthorizationError(OperationalError): pass
+
+# For database-integrity problems that aren't constraint violations.
+class DatabaseCorruptError(DatabaseError): pass
