@@ -2769,7 +2769,6 @@ cdef int cyOpen(sqlite3_vtab *pBase, sqlite3_vtab_cursor **ppCursor) noexcept wi
         return SQLITE_NOMEM
 
     memset(<char *>pCur, 0, sizeof(pCur[0]))
-    ppCursor[0] = &(pCur.base)
     pCur.idx = 0
     pCur.row_data = NULL
     pCur.stopped = False
@@ -2785,6 +2784,7 @@ cdef int cyOpen(sqlite3_vtab *pBase, sqlite3_vtab_cursor **ppCursor) noexcept wi
 
     Py_INCREF(table_func)
     pCur.table_func = <void *>table_func
+    ppCursor[0] = &(pCur.base)
     return SQLITE_OK
 
 
@@ -2841,8 +2841,12 @@ cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
         if len(result) == 2 and isinstance(result[1], tuple):
             pCur.idx = result[0]
             result = result[1]
-        else:
+        elif len(result) == table_func._ncols:
             pCur.idx += 1
+        else:
+            # Provided wrong number or type of args.
+            return SQLITE_ERROR
+
         Py_INCREF(result)
         pCur.row_data = <void *>result
         pCur.stopped = False
@@ -3166,14 +3170,33 @@ class TableFunction(object):
     columns = None
     params = None
     name = None
-    print_tracebacks = True
+    print_tracebacks = False
     _ncols = 0
     _nparams = 0
 
     @classmethod
     def register(cls, Connection conn):
+        if cls.columns is None:
+            raise ProgrammingError(f'{cls.__name__}.columns must be defined')
+        for col in cls.columns:
+            if isinstance(col, tuple) and len(col) != 2:
+                raise ProgrammingError(
+                    f'{cls.__name__}.columns entries must be strings or '
+                    f'(name, type) 2-tuples, got {col!r}')
+            elif not isinstance(col, (str, tuple)):
+                raise ProgrammingError(
+                    f'{cls.__name__}.columns entries must be strings or '
+                    f'(name, type) 2-tuples, got {col!r}')
+        if cls.params is not None:
+            if not isinstance(cls.params, (list, tuple)):
+                raise ProgrammingError(
+                    f'{cls.__name__}.params must be a list or tuple')
+
         cdef _TableFunctionImpl impl = _TableFunctionImpl(cls)
         impl.create_module(conn)
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
         cls._ncols = len(cls.columns) if cls.columns is not None else 0
         cls._nparams = len(cls.params) if cls.params is not None else 0
 
