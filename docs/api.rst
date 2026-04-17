@@ -32,7 +32,7 @@ Module
    :rtype: :class:`Connection`
 
    Default flags are ``SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE``. If ``uri``
-   is set **or** ``'://'`` occurs in the database name, ``SQLITE_OPEN_URI``
+   is set **or** the database name begins with ``'file:'``, ``SQLITE_OPEN_URI``
    will be included.
 
    Example:
@@ -118,7 +118,7 @@ Connection
       is opened, e.g. ``{'journal_mode': 'wal'}``.
 
    Default flags are ``SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE``. If ``uri``
-   is set **or** ``'://'`` occurs in the database name, ``SQLITE_OPEN_URI``
+   is set **or** the database name begins with ``'file:'``, ``SQLITE_OPEN_URI``
    will be included.
 
    Examples:
@@ -1110,9 +1110,12 @@ Connection
           The number of arguments the SQL function can accept. If ``-1``, it
           may take any number of arguments.
       :param bool deterministic:
-          If ``True``, the created SQL function is marked as
-          `deterministic <https://sqlite.org/deterministic.html>`_,
-          which allows SQLite to perform additional optimizations.
+          If ``True`` (the default), the created SQL function is marked as
+          `deterministic <https://sqlite.org/deterministic.html>`_, which allows
+          SQLite to perform additional optimizations: the result can be reused
+          across references within a single row, and the function can be used
+          inside indexes on expressions, CHECK constraints, generated columns,
+          and partial-index ``WHERE`` clauses.
 
       Example:
 
@@ -1140,15 +1143,22 @@ Connection
             a type natively supported by SQLite.
 
           The number of arguments that the ``step()`` method must accept
-          is controlled by *n_arg*.
+          is controlled by *nargs*.
 
           Set to ``None`` to remove an existing SQL aggregate function.
       :type agg: class | None
       :param str name: name of the SQL aggregate function. If unspecified, the
           name of the Python class will be used.
-      :param int n_arg:
+      :param int nargs:
           The number of arguments the SQL aggregate function can accept.
           If ``-1``, it may take any number of arguments.
+      :param bool deterministic:
+          If ``True`` (the default), the created SQL function is marked as
+          `deterministic <https://sqlite.org/deterministic.html>`_, which allows
+          SQLite to perform additional optimizations: the result can be reused
+          across references within a single row, and the function can be used
+          inside indexes on expressions, CHECK constraints, generated columns,
+          and partial-index ``WHERE`` clauses.
 
       Examples:
 
@@ -1194,15 +1204,22 @@ Connection
             a type natively supported by SQLite.
 
           The number of arguments that the ``step()`` and ``inverse()`` methods
-          must accept is controlled by *n_arg*.
+          must accept is controlled by *nargs*.
 
           Set to ``None`` to remove an existing SQL window function.
       :type agg: class | None
       :param str name: name of the SQL window function. If unspecified, the
           name of the Python class will be used.
-      :param int n_arg:
+      :param int nargs:
           The number of arguments the SQL window function can accept.
           If ``-1``, it may take any number of arguments.
+      :param bool deterministic:
+          If ``True`` (the default), the created SQL function is marked as
+          `deterministic <https://sqlite.org/deterministic.html>`_, which allows
+          SQLite to perform additional optimizations: the result can be reused
+          across references within a single row, and the function can be used
+          inside indexes on expressions, CHECK constraints, generated columns,
+          and partial-index ``WHERE`` clauses.
 
       .. code-block:: python
 
