@@ -1981,6 +1981,14 @@ Cursor
       Return the count of rows modified by the last operation. Returns ``-1``
       for queries that do not modify data.
 
+      For DML statements with a ``RETURNING`` clause, ``rowcount`` is updated
+      incrementally as the result set is stepped. It reflects the final
+      affected-row count only after the cursor has been fully drained (via
+      :meth:`fetchall`, iteration to completion, or exhausting
+      :meth:`fetchmany`). Reading ``rowcount`` mid-iteration is safe but may
+      report a partial count; the exact pre-drain value depends on the SQLite
+      query plan and should not be relied on.
+
    .. method:: __enter__()
                __exit__(exc_type, exc_val, exc_tb)
 
