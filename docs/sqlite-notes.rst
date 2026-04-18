@@ -193,3 +193,35 @@ a specified data-type to what SQLite tells us:
 * Split on the first whitespace or ``"("`` character, e.g. if SQLite
   tells us the data-type is ``NUMERIC(10, 2)``, cysqlite will attempt to
   find a converter named ``numeric``.
+
+Differences from stdlib
+-----------------------
+
+The stdlib ``sqlite3`` module uses different conventions for registering
+adapters and converters:
+
+* Adapters and converters in ``sqlite3`` are registered *globally*. In
+  ``cysqlite``, they are scoped to the :class:`Connection`.
+* ``sqlite3`` converters — functions that transform values coming *from*
+  SQLite back into richer Python types — are disabled by default, and are
+  enabled via the ``detect_types`` parameter on ``connect()``. Two modes
+  are available: matching against the column's declared type
+  (``PARSE_DECLTYPES``) and matching against a type hint embedded in a
+  column alias (``PARSE_COLNAMES``). cysqlite always matches against
+  declared types, and has no column-alias mechanism.
+* ``sqlite3`` has a separate adaptation mechanism that checks for a
+  ``__conform__()`` method on the object being bound; the method's return
+  value is used in place of the original. cysqlite has no equivalent —
+  bind either a supported type directly, or register an adapter.
+* ``sqlite3`` historically shipped default adapters for ``datetime`` and
+  ``date``, and also handled ``datetime`` via two magic type names, but
+  these are deprecated as of Python 3.12.
+
+cysqlite is more permissive about what types it will accept at bind time. Any
+object with a ``__float__`` method (e.g. ``Decimal``, ``Fraction``) is bound as
+``REAL``, and anything else falls back to ``str(x)`` rather than raising
+``TypeError``. Additionally, cysqlite provides ISO-8601 formatting for
+``datetime`` and ``date`` out of the box with no surprise deprecations.
+Sqlite's built-in `date functions <https://sqlite.org/lang_datefunc.html>`_
+work well on ISO-8601 format, so this allows date/times stored by ``cysqlite``
+to be usable with the builtin date functions.
