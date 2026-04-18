@@ -273,6 +273,10 @@ cdef class Row(object):
         return dict(self.items())
 
 
+def dict_factory(Cursor cursor, tuple row):
+    return {d[0]: v for d, v in zip(cursor.description, row)}
+
+
 @cython.internal
 cdef class Statement(object):
     cdef:

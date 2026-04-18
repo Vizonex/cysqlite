@@ -2005,8 +2005,8 @@ Cursor
 
          # Cursor is now closed and the statement cache is released.
 
-Row
----
+Row Factories
+-------------
 
 .. class:: Row(cursor, data)
 
@@ -2070,6 +2070,15 @@ Row
       seen = set()
       for row in db.execute('select * from users'):
           seen.add(row)
+
+
+.. function:: dict_factory(cursor, data)
+
+   :param Cursor cursor:
+   :param tuple data:
+
+   Row factory that returns rows as dicts, to be used with :attr:`Connection.row_factory`
+   or :attr:`Cursor.row_factory`.
 
 
 Blob

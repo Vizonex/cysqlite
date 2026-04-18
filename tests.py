@@ -1361,9 +1361,6 @@ class TestRowFactory(BaseTestCase):
         self.assertEqual(row[2], 3)
 
     def test_custom_factory(self):
-        def dict_factory(cursor, row):
-            return {d[0]: v for (d, v) in zip(cursor.description, row)}
-
         self.db.row_factory = dict_factory
         curs = self.db.execute('select * from kv order by key')
         r1 = curs.fetchone()

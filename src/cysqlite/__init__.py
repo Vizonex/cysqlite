@@ -6,6 +6,7 @@ from cysqlite._cysqlite import (
     compile_option,
     connect,
     damerau_levenshtein_dist,
+    dict_factory,
     levenshtein_dist,
     median,
     rank_bm25,
