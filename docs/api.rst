@@ -347,16 +347,19 @@ Connection
       :rtype: bool
       :raises: :class:`OperationalError` if opening database fails.
 
-   .. method:: close()
+   .. method:: close(force=False)
 
       Close the database, finalizing all cursors and other hooks and handles
       associated with the active connection.
 
+      :param bool force: Force close, even if transaction is open (any open
+          transaction will be rolled-back).
       :return: ``True`` if database was previously open and is now closed. If
           database was already closed returns ``False``.
       :rtype: bool
-      :raises: :class:`OperationalError` if transaction is still active or
-          an error occurs while closing the connection.
+      :raises: :class:`OperationalError` if transaction is still active (and
+          ``force`` not specified), **or** an error occurs while closing the
+          connection.
 
    .. method:: is_closed()
 

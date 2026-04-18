@@ -186,10 +186,12 @@ class TestConnection(BaseTestCase):
 
     def test_error_closing(self):
         db = Connection(':memory:')
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(ValueError):
             with db:
                 with db.atomic() as txn:
                     raise ValueError('fail')
+
+        self.assertTrue(db.is_closed())
 
         with self.assertRaises(ValueError) as ctx:
             with db:
@@ -201,6 +203,45 @@ class TestConnection(BaseTestCase):
             self.assertFalse(db.is_closed())
             txn.__exit__(None, None, None)
             self.assertTrue(db.close())
+
+    def test_force_close(self):
+        db = Connection(self.filename)
+        db.execute('create table g(k)')
+        txn = db.transaction()
+        txn.__enter__()
+        db.execute('insert into g(k) values (?)', (1,))
+        self.assertTrue(db.close(force=True))
+        self.assertTrue(db.is_closed())
+
+        with db:
+            with db.atomic():
+                count = db.execute('select count(*) from g').scalar()
+                self.assertEqual(count, 0)
+
+    def test_force_close_within_atomic(self):
+        db = Connection(self.filename)
+        db.execute('create table g(k)')
+
+        with db:
+            with db.atomic() as txn:
+                db.execute('insert into g(k) values (?)', (1,))
+                self.assertTrue(db.close(force=True))
+
+        self.assertTrue(db.is_closed())
+
+        with db:
+            with db.atomic() as txn:
+                with db.atomic() as sp:
+                    with db.atomic() as sp2:
+                        db.execute('insert into g(k) values (?)', (2,))
+                        db.close(force=True)
+
+        self.assertTrue(db.is_closed())
+
+        with db:
+            with db.atomic():
+                count = db.execute('select count(*) from g').scalar()
+                self.assertEqual(count, 0)
 
     def test_limit(self):
         db = Connection(':memory:')

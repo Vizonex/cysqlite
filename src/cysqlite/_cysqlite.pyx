@@ -926,13 +926,19 @@ cdef class Connection(_callable_context_manager):
         self.stmt_in_use.clear()
         self.stmt_available.clear()
 
-    def close(self):
+    def close(self, force=False):
         if self.db == NULL:
             return False
 
         if self._transaction_depth > 0:
-            raise OperationalError('cannot close database while a transaction '
-                                   'is open.')
+            if force:
+                try:
+                    self.rollback()
+                finally:
+                    self._transaction_depth = 0
+            else:
+                raise OperationalError('cannot close database while a '
+                                       'transaction is open.')
 
         if self._trace_hook is not None:
             sqlite3_trace_v2(self.db, 0, NULL, NULL)
@@ -992,6 +998,8 @@ cdef class Connection(_callable_context_manager):
                                        SQLITE_OPEN_CREATE)
             int rc
 
+        self._transaction_depth = 0
+
         if self.vfs is not None:
             bvfs = encode(self.vfs)
             zvfs = PyBytes_AsString(bvfs)
@@ -1045,14 +1053,12 @@ cdef class Connection(_callable_context_manager):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is not None:
-            # An exception is already being raised, so make a best-effort to
-            # close, but do not swallow the original error (if close() fails).
             try:
-                self.close()
+                self.close(force=True)
             except Exception as exc:
                 raise exc_val from exc
         else:
-            self.close()
+            self.close(force=True)
         return False
 
     @property
@@ -2179,6 +2185,9 @@ cdef class Transaction(_callable_context_manager):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.conn.db:
+            return
+
         is_bottom = self.conn._transaction_depth == 1
 
         try:
@@ -2224,6 +2233,9 @@ cdef class Savepoint(_callable_context_manager):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.conn.db:
+            return
+
         if exc_type:
             try:
                 self.rollback()
