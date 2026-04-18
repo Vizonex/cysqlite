@@ -225,3 +225,272 @@ object with a ``__float__`` method (e.g. ``Decimal``, ``Fraction``) is bound as
 Sqlite's built-in `date functions <https://sqlite.org/lang_datefunc.html>`_
 work well on ISO-8601 format, so this allows date/times stored by ``cysqlite``
 to be usable with the builtin date functions.
+
+.. _transactions:
+
+Transactions
+============
+
+cysqlite operates in pure autocommit mode as this is how SQLite itself operates.
+Statements execute immediately unless you've explicitly opened a transaction.
+The driver never issues implicit transaction control statements on your behalf.
+To use transactions, open one with :meth:`~Connection.begin`, :meth:`~Connection.atomic`,
+:meth:`~Connection.transaction`, or by executing ``BEGIN`` directly.
+
+.. code-block:: python
+
+   db = connect(':memory:')
+
+   # Autocommit: each statement is its own transaction.
+   db.execute('create table t (x)')
+   db.execute('insert into t values (1)')  # Committed immediately.
+
+   # Explicit transaction via context manager.
+   with db.atomic():
+       db.execute('insert into t values (2)')
+       db.execute('insert into t values (3)')
+   # Committed on successful exit, rolled back on exception.
+
+   # Or manage it by hand.
+   db.begin()
+   try:
+       db.execute('insert into t values (4)')
+       db.commit()
+   except:
+       db.rollback()
+       raise
+
+:attr:`~Connection.in_transaction` uses ``sqlite3_get_autocommit()`` to detect
+if a transaction is currently active.
+
+Why autocommit
+--------------
+
+SQLite allows only one writer at a time, and a transaction that has performed
+**any** write will hold an exclusive lock until it commits or rolls back. An
+application that holds transactions open longer than necessary, even by
+accident, will see ``OperationalError: database is locked`` under concurrency.
+``sqlite3`` makes this class of bug trivially easy to write: you execute an
+innocent-looking ``UPDATE``, a transaction opens silently, and then spend some
+more time issuing a bunch of ``SELECT`` queries or handling other things before
+you call ``commit()``, which finally releases the lock.
+
+``sqlite3`` transactions are an absolute clown show. They use a string prefix
+compare to detect if a statement is data-modifying, which triggers the
+silent ``BEGIN``. The rule, even in Python 3.14, is if the statement starts
+with ``INSERT``, ``UPDATE``, ``DELETE``, or ``REPLACE``, the driver automatically
+begins a transaction before executing it. Predictable consequences:
+
+* ``INSERT INTO ...`` auto-begins a transaction.
+* ``/* important comment */ INSERT INTO ...`` does not, because the comment
+  comes first.
+* ``WITH cte AS (...) INSERT INTO ...`` does not, because it starts with
+  ``WITH``. Your CTE-using writes silently run in autocommit while your
+  non-CTE writes run in implicit transactions. Good luck debugging.
+
+There was a moment in the Python 3.6 beta cycle where this was going to be
+fixed by calling ``sqlite3_stmt_readonly()``, the C API SQLite provides for
+exactly this question. The change was reverted before release because it
+broke ``conn.execute("BEGIN IMMEDIATE")`` (``BEGIN`` isn't read-only, so the
+new logic tried to auto-BEGIN before the user's explicit ``BEGIN`` and
+errored). Rather than fix that edge case, the maintainers went back to string
+matching and added a second special case for DDL. That's the code that's
+been in production since 2016. `Discussion on the SQLite forum <https://www.sqlite.org/forum/forumpost/c5c281dce2>`_
+has the full archaeological record if you want to lose an afternoon. I also
+tried to get CPython on-board again in 2019 with `this pull request <https://github.com/python/cpython/pull/13216>`_
+but someone shitted up the discussion with strawmen and the core team decided
+to invent an even stupider way to handle things...
+
+.. tip::
+   CPython loves treating backwards-compat as sacrosanct when it suits them,
+   and aggressively deprecating according to their whims. Right now they are
+   moving towards changing the way transactions work (naturally making the
+   situation even worse).
+
+Pre-3.12 sqlite3 provided implicit transactions keyed on statement type. By
+default a transaction auto-begins before any DML statement using the already-belabored
+string compare. This transaction is held open until you call ``commit()`` or
+``rollback()``. The ``isolation_level`` parameter controls what flavor of ``BEGIN``
+gets emitted, and passing the mysterious incantation ``isolation_level=None`` is
+the "open sesame" that disables the auto-begin and gives you something close to
+sane:
+
+.. code-block:: python
+
+   # Specifying isolation_level=None tells sqlite3 to leave transaction
+   # management alone.
+   >>> db = sqlite3.connect(':memory:', isolation_level=None)
+
+   # Wait, what's this? Legacy??
+   >>> db.autocommit == sqlite3.LEGACY_TRANSACTION_CONTROL
+   True
+
+   # Whatever, at least we are in autocommit mode.
+   >>> db.in_transaction
+   False
+
+   # Run a transaction.
+   >>> db.execute('begin')
+   >>> db.in_transaction
+   True
+
+   # Let's get out of this transaction.
+   >>> db.commit()
+   >>> db.in_transaction
+   False
+
+This works. It has always worked. But based on how CPython moves fast and
+breaks things, expect this to stop working in the next year or two. In its
+place, CPython has given us a new, completely separate alternative:
+
+.. code-block:: python
+
+   # Let's do it the way modern Python wants us to.
+   >>> db = sqlite3.connect(':memory:', autocommit=True)
+
+   # Isolation level returns an empty string. Empty. It means whatever you
+   # want it to mean.
+   >>> db.isolation_level
+   ''
+
+   >>> db.in_transaction
+   False
+
+   # So far so good.
+   >>> db.execute('begin')
+   >>> db.in_transaction
+   True
+
+   # Wait, what the fuck?!
+   >>> db.commit()
+   >>> db.in_transaction
+   True
+
+   >>> db.execute('commit -- who thought this was a good idea?!')
+   >>> db.in_transaction
+   False
+
+If you didn't catch what happened there, when we set ``autocommit=True``, Python
+**silently** turned ``commit()`` into a no-op for some inexplicable reason. No
+deprecation warning, no exception. If you call ``commit()`` and then close the
+connection, or let it be garbage-collected, all your changes are silently lost.
+
+The icing on the cake is that the "legacy" mode we're supposed to migrate
+away from handles this just fine:
+
+.. code-block:: python
+
+   >>> db = sqlite3.connect(':memory:', isolation_level=None)
+   >>> db.execute('begin')
+   >>> db.in_transaction
+   True
+   >>> db.execute('commit')
+   >>> db.in_transaction
+   False
+
+The legacy method just works, you can call the ``commit()`` method or explicitly
+execute a ``COMMIT`` query, and both do the obvious thing. The new-and-improved
+method is doing all kinds of weird stuff.
+
+The other direction is just as bad. With ``autocommit=False`` (which the
+docs now recommend), a transaction begins immediately on connection, lasts
+until you commit, and a fresh one begins right after. Every connection is
+always in a transaction, forever. For a database whose entire concurrency
+story hinges on keeping write transactions short, this is the worst possible
+default.
+
+The end result is that, depending on your Python version and which keyword
+arguments you passed to ``connect()``, you are now in one of three
+incompatible transaction regimes, and in one of them, ``commit()`` silently
+does nothing. The predictable consequence is that the standard library has
+collected `pull requests <https://github.com/python/cpython/pull/137505>`_ like
+this one. It's amazing.
+
+cysqlite's answer to all of this: :meth:`~Connection.commit` commits. Always.
+:meth:`~Connection.rollback` rolls back. Always. There is no flag to
+configure, no legacy mode, and no scenario where calling ``commit()`` is a
+no-op. If there is no active transaction, it raises :class:`OperationalError`
+rather than silently succeeding.
+
+.. _transactions-recommended:
+
+Recommended patterns
+--------------------
+
+:meth:`~Connection.atomic` can wrap a block of code or decorate a function with
+transaction semantics, and supports nesting. It opens a transaction at the
+outermost level and a savepoint for nested calls:
+
+.. code-block:: python
+
+   with db.atomic():
+       db.execute('insert into orders (user_id, total) values (?, ?)',
+                  (user_id, total))
+       for item in line_items:
+           db.execute('insert into order_items (...) values (...)', item)
+   # Commits on clean exit; rolls back if anything raised.
+
+Atomic blocks nest **correctly**. A failure inside a nested block rolls back
+the savepoint without affecting the outer transaction:
+
+.. code-block:: python
+
+   with db.atomic():
+       db.execute('insert into users (name) values (?)', ('alice',))
+
+       try:
+           with db.atomic():
+               db.execute('insert into users (name) values (?)', ('alice',))
+               # IntegrityError — savepoint is rolled back.
+       except IntegrityError:
+           pass
+
+       # Outer transaction is unaffected. 'alice' is still pending.
+
+   # 'alice' is committed.
+
+If you need a specific lock type, pass ``lock=``. Use ``IMMEDIATE`` when
+you know you're going to write and want to fail fast if another writer holds
+the lock, rather than discovering it mid-transaction:
+
+.. code-block:: python
+
+   with db.atomic(lock='IMMEDIATE'):
+       db.execute('update counters set n = n + 1 where id = ?', (id_,))
+
+If you explicitly want a flat transaction without savepoint nesting, use
+:meth:`~Connection.transaction` instead of :meth:`~Connection.atomic`.
+Nested ``transaction()`` calls no-op on the inner levels, only the outermost
+block controls commit/rollback.
+
+For partial rollbacks within a larger transaction, :meth:`~Connection.atomic`
+(or :meth:`~Connection.savepoint`) provides savepoints that can be committed or
+rolled-back within a larger atomic context:
+
+.. code-block:: python
+
+   with db.atomic():
+       db.execute('insert into log (msg) values (?)', ('step 1',))
+
+       with db.atomic() as sp:
+           db.execute('insert into log (msg) values (?)', ('step 2',))
+           if something_went_wrong:
+               sp.rollback()  # Undo step 2 only.
+
+       db.execute('insert into log (msg) values (?)', ('step 3',))
+
+As a decorator, any of the three helpers wraps the decorated function
+in a transaction/savepoint:
+
+.. code-block:: python
+
+   @db.atomic()
+   def transfer_funds(from_id, to_id, amount):
+       db.execute('update accounts set bal = bal - ? where id = ?',
+                  (amount, from_id))
+       db.execute('update accounts set bal = bal + ? where id = ?',
+                  (amount, to_id))
+
+For all other cases you can explicitly call :meth:`~Connection.begin`,
+:meth:`~Connection.commit` and :meth:`~Connection.rollback` (or execute the SQL
+directly via ``execute()``).
