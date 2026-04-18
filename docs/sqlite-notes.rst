@@ -275,11 +275,12 @@ innocent-looking ``UPDATE``, a transaction opens silently, and then spend some
 more time issuing a bunch of ``SELECT`` queries or handling other things before
 you call ``commit()``, which finally releases the lock.
 
-``sqlite3`` transactions are an absolute clown show. They use a string prefix
-compare to detect if a statement is data-modifying, which triggers the
-silent ``BEGIN``. The rule, even in Python 3.14, is if the statement starts
-with ``INSERT``, ``UPDATE``, ``DELETE``, or ``REPLACE``, the driver automatically
-begins a transaction before executing it. Predictable consequences:
+``sqlite3`` transactions are an absolute clown show. They use a `string prefix
+compare <https://github.com/python/cpython/blob/80ba4e10f5070e6d2e35618e08057be44f913965/Modules/_sqlite/statement.c#L82-L91>`_
+to detect if a statement is data-modifying, which triggers the silent ``BEGIN``.
+The rule, even in Python 3.14, is if the statement starts with ``INSERT``,
+``UPDATE``, ``DELETE``, or ``REPLACE``, the driver automatically begins a
+transaction before executing it. Predictable consequences:
 
 * ``INSERT INTO ...`` auto-begins a transaction.
 * ``/* important comment */ INSERT INTO ...`` does not, because the comment
