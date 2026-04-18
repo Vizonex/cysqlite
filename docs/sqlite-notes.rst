@@ -3,13 +3,8 @@
 SQLite Notes
 ============
 
-SQLite's type system is different from other databases. In the first place, it
-is much more flexible in what types of data it will store in a column, even if
-the column declares a particular data-type. SQLite stores data in five simple
-types, and notably does not natively support DATETIME / DATE / JSON. Instead
-these are all emulated using either TEXT or numeric types (e.g. timestamps).
-
-The following shows the correspondence between Python types and SQLite types:
+SQLite's type system is different from other databases. SQLite stores data in
+five simple types:
 
 +-------------------------------+-------------+
 | Python type                   | SQLite type |
@@ -25,8 +20,24 @@ The following shows the correspondence between Python types and SQLite types:
 | ``bytes`` / buffers           | ``BLOB``    |
 +-------------------------------+-------------+
 
-Additionally, for convenience, cysqlite applies the following rules for
-adapting Python types:
+Notably SQLite does not natively support:
+
+* **datetime / date** - store these as ISO-formatted text or as unix timestamps.
+* **fixed-precision decimals** - no native type. cysqlite stores ``Decimal`` as
+  ``REAL`` by default, which can lose precision for values that aren't exactly
+  representable as floats. Register a custom :ref:`adapter <sqlite-notes-adapters>`
+  to store as ``TEXT`` if exact precision is required.
+* **boolean** - emulated as integer ``1`` and ``0``.
+* **json** - SQLite has JSON support, but it is stored as ``TEXT`` or ``BLOB``
+  (for JSONB).
+
+SQLite will store any value in a column regardless of its declared type, using
+`type affinity <https://www.sqlite.org/datatype3.html#type_affinity>`_ to
+influence how the data is stored. Strict typing is opt-in with `strict tables <https://www.sqlite.org/stricttables.html>`_
+(requires SQLite 3.37.0+).
+
+For convenience, cysqlite applies the following rules for adapting Python types
+to match SQLite's available data-types:
 
 +-------------------------------+-------------------------------------------+
 | Python type                   | SQLite type                               |
@@ -74,14 +85,16 @@ Examples:
    # ('text',    '2026-03-04')
    # ('text',    '0c4ca10a-56ab-470a-9357-d28366d97ceb')
 
+.. _sqlite-notes-adapters:
+
 Adapters
 ---------
 
-We can add our own custom adapters to control exactly how Python types are
-sent to SQLite using :meth:`Connection.register_adapter` and the
-:meth:`~Connection.adapter` decorator. For example, it may be desirable to
-store ``Decimal`` values as ``TEXT`` in order to avoid float-point precision
-issues, or to store ``date`` as an 8-digit integer:
+You can add custom adapters to control exactly how Python types are sent to
+SQLite using :meth:`Connection.register_adapter` and the :meth:`~Connection.adapter`
+decorator. For example, it may be desirable to store ``Decimal`` values as
+``TEXT`` in order to avoid float-point precision issues, or to store ``date``
+as an 8-digit integer:
 
 .. code-block:: python
 
@@ -111,18 +124,17 @@ Converters
 By default, no special attempts at type inference are applied to data coming
 **from** SQLite. As you can see in the above examples, all our Python values
 were coerced to reasonable SQLite-friendly representations. But that richness
-is lost when going from SQLite to Python without specific helpers that read the
-column type of the value.
+is lost when reading data from SQLite into Python without specific helpers that
+read each column's declared type.
 
-To convert data coming from SQLite to Python, you will need to register one or
+To convert data going from SQLite into Python, you will need to register one or
 more converters using :meth:`Connection.register_converter` or using the
 :meth:`Connection.converter` decorator. Converters rely on the SQLite
 `sqlite3_column_decltype <https://www.sqlite.org/c3ref/column_decltype.html>`_
 API, which retrieves the declared type of the given column. cysqlite then
 applies your converter for any type that was registered.
 
-For example, to convert columns declared ``DATETIME`` back to Python datetimes,
-you might register the following:
+For example, to convert columns declared ``DATETIME`` back to Python datetimes:
 
 .. code-block:: python
 
