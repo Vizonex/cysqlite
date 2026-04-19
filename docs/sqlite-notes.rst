@@ -245,7 +245,7 @@ To use transactions, open one with :meth:`~Connection.begin`, :meth:`~Connection
    db.execute('create table t (x)')
    db.execute('insert into t values (1)')  # Committed immediately.
 
-   # Explicit transaction via context manager.
+   # Explicit transaction via context manager, supports nesting.
    with db.atomic():
        db.execute('insert into t values (2)')
        db.execute('insert into t values (3)')
@@ -272,15 +272,15 @@ application that holds transactions open longer than necessary, even by
 accident, will see ``OperationalError: database is locked`` under concurrency.
 ``sqlite3`` makes this class of bug trivially easy to write: you execute an
 innocent-looking ``UPDATE``, a transaction opens silently, and then spend some
-more time issuing a bunch of ``SELECT`` queries or handling other things before
-you call ``commit()``, which finally releases the lock.
+more time issuing ``SELECT`` queries or handling other things before you call
+``commit()``, which finally releases the lock.
 
 ``sqlite3`` transactions are an absolute clown show. They use a `string prefix
 compare <https://github.com/python/cpython/blob/80ba4e10f5070e6d2e35618e08057be44f913965/Modules/_sqlite/statement.c#L82-L91>`_
 to detect if a statement is data-modifying, which triggers the silent ``BEGIN``.
-The rule, even in Python 3.14, is if the statement starts with ``INSERT``,
-``UPDATE``, ``DELETE``, or ``REPLACE``, the driver automatically begins a
-transaction before executing it. Predictable consequences:
+Even in Python 3.14, if the statement starts with ``INSERT``, ``UPDATE``, ``DELETE``,
+or ``REPLACE``, the driver automatically begins a transaction before executing
+it. Predictable consequences:
 
 * ``INSERT INTO ...`` auto-begins a transaction.
 * ``/* important comment */ INSERT INTO ...`` does not, because the comment
@@ -289,32 +289,32 @@ transaction before executing it. Predictable consequences:
   ``WITH``. Your CTE-using writes silently run in autocommit while your
   non-CTE writes run in implicit transactions. Good luck debugging.
 
-There was a moment in the Python 3.6 beta cycle where this was going to be
-fixed by calling ``sqlite3_stmt_readonly()``, the C API SQLite provides for
-exactly this question. The change was reverted before release because it
-broke ``conn.execute("BEGIN IMMEDIATE")`` (``BEGIN`` isn't read-only, so the
+There was a moment in the Python 3.6 days where this was going to be fixed by
+calling ``sqlite3_stmt_readonly()``, the C API SQLite provides for exactly this
+question. The change was reverted before release because it broke
+``conn.execute("BEGIN IMMEDIATE")`` (``BEGIN`` isn't read-only, so the
 new logic tried to auto-BEGIN before the user's explicit ``BEGIN`` and
 errored). Rather than fix that edge case, the maintainers went back to string
-matching and added a second special case for DDL. That's the code that's
-been in production since 2016. `Discussion on the SQLite forum <https://www.sqlite.org/forum/forumpost/c5c281dce2>`_
-has the full archaeological record if you want to lose an afternoon. I also
-tried to get CPython on-board again in 2019 with `this pull request <https://github.com/python/cpython/pull/13216>`_
-but someone shitted up the discussion with strawmen and the core team decided
-to invent an even stupider way to handle things...
+matching and added a **second** special case for DDL. That's the code that's
+been in production since 2016. `Discussion on the SQLite forum <https://www.sqlite.org/forum/forumpost/1695c80438ebd464>`_
+have some nice discussion. I also tried to get CPython on-board again in 2019
+with `this pull request <https://github.com/python/cpython/pull/13216>`_ but
+someone shitted up the discussion with strawmen and the core team decided to
+invent an even stupider way to handle things...
 
 .. tip::
    CPython loves treating backwards-compat as sacrosanct when it suits them,
-   and aggressively deprecating according to their whims. Right now they are
+   but they will aggressively deprecate at other times. Right now they are
    moving towards changing the way transactions work (naturally making the
    situation even worse).
 
-Pre-3.12 sqlite3 provided implicit transactions keyed on statement type. By
-default a transaction auto-begins before any DML statement using the already-belabored
-string compare. This transaction is held open until you call ``commit()`` or
-``rollback()``. The ``isolation_level`` parameter controls what flavor of ``BEGIN``
-gets emitted, and passing the mysterious incantation ``isolation_level=None`` is
-the "open sesame" that disables the auto-begin and gives you something close to
-sane:
+Pre-3.12 sqlite3 uses the ``isolation_level`` parameter to control
+driver-managed transactions. By default a transaction auto-begins before any
+DML statement using the already-belabored string compare. This transaction is
+held open until you call ``commit()`` or ``rollback()``. The ``isolation_level``
+parameter controls what flavor of ``BEGIN`` gets emitted, and passing the
+special incantation ``isolation_level=None`` is the "open sesame" that disables
+the auto-begin and gives you something close to sane:
 
 .. code-block:: python
 
@@ -372,9 +372,9 @@ place, CPython has given us a new, completely separate alternative:
    False
 
 If you didn't catch what happened there, when we set ``autocommit=True``, Python
-**silently** turned ``commit()`` into a no-op for some inexplicable reason. No
-deprecation warning, no exception. If you call ``commit()`` and then close the
-connection, or let it be garbage-collected, all your changes are silently lost.
+**silently** turned ``commit()`` into a no-op. No deprecation warning, no
+exception. If you call ``commit()`` and then close the connection, or let it be
+garbage-collected, all your changes are silently lost.
 
 The icing on the cake is that the "legacy" mode we're supposed to migrate
 away from handles this just fine:
@@ -385,7 +385,7 @@ away from handles this just fine:
    >>> db.execute('begin')
    >>> db.in_transaction
    True
-   >>> db.execute('commit')
+   >>> db.commit()
    >>> db.in_transaction
    False
 
@@ -396,9 +396,8 @@ method is doing all kinds of weird stuff.
 The other direction is just as bad. With ``autocommit=False`` (which the
 docs now recommend), a transaction begins immediately on connection, lasts
 until you commit, and a fresh one begins right after. Every connection is
-always in a transaction, forever. For a database whose entire concurrency
-story hinges on keeping write transactions short, this is the worst possible
-default.
+always in a transaction. This is problematic because of the way SQLite upgrades
+the lock when a write occurs, retaining it until a commit/rollback occurs.
 
 The end result is that, depending on your Python version and which keyword
 arguments you passed to ``connect()``, you are now in one of three
