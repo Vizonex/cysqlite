@@ -3,7 +3,8 @@
 ![](https://raw.githubusercontent.com/coleifer/cysqlite/refs/heads/master/docs/logo.png)
 
 cysqlite provides performant bindings to SQLite. cysqlite aims to be roughly
-compatible with the behavior of the standard lib `sqlite3` module.
+compatible with the behavior of the standard lib `sqlite3` module but without
+the weirdness.
 
 cysqlite supports standalone builds or dynamic-linking with the system SQLite.
 
@@ -21,6 +22,7 @@ cysqlite supports standalone builds or dynamic-linking with the system SQLite.
 * Row objects with dict-like access
 * Schema introspection utilities
 * Asyncio support
+* Easy to create fully self-contained builds
 
 ### Installing
 
