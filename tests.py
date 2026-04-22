@@ -2676,7 +2676,7 @@ class TestBackup(BaseTestCase):
         rows = list(conn.execute('select v from aux.t'))
         self.assertEqual(rows, [('payload',)])
 
-    def test_ensure_conn(self):
+    def test_serialize_ensure_conn(self):
         conn = Connection(':memory:')
         conn.close()
         with self.assertRaises(OperationalError):
@@ -2687,6 +2687,37 @@ class TestBackup(BaseTestCase):
         conn.close()
         with self.assertRaises(OperationalError):
             conn.deserialize(data)
+
+    def test_deserialize_requires_attached_schema(self):
+        # deserialize() requires the target schema to already be attached.
+        with Connection(':memory:') as src:
+            src.execute('create table t (v)')
+            src.execute('insert into t values (?)', ('payload',))
+            data = src.serialize()
+
+        conn = Connection(':memory:')
+
+        # Sanity check: 'main' and 'temp' are always attached.
+        attached = {row[0] for row in conn.database_list()}
+        self.assertIn('main', attached)
+        self.assertNotIn('snapshot', attached)
+
+        # Deserializing into a non-attached schema fails.
+        with self.assertRaises(OperationalError):
+            conn.deserialize(data, name='snapshot')
+
+        # The failed call did not silently create or populate 'snapshot'.
+        attached_after = {row[0] for row in conn.database_list()}
+        self.assertNotIn('snapshot', attached_after)
+
+        # Attach it properly, then deserialize works.
+        conn.execute("attach ':memory:' as snapshot")
+        conn.deserialize(data, name='snapshot')
+
+        rows = list(conn.execute('select v from snapshot.t'))
+        self.assertEqual(rows, [('payload',)])
+
+        conn.close()
 
 
 class TestStatementUsage(BaseTestCase):
