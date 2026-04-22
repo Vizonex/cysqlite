@@ -2663,31 +2663,6 @@ class TestBackup(BaseTestCase):
         with self.assertRaises(DatabaseError):
             conn.execute('select 1 from sqlite_master').fetchall()
 
-    def test_deserialize_attached_schema(self):
-        with Connection(':memory:') as src:
-            src.execute('create table t (v)')
-            src.execute('insert into t values (?)', ('payload',))
-            data = src.serialize()
-
-        conn = Connection(':memory:')
-        conn.execute("attach ':memory:' as aux")
-        conn.deserialize(data, name='aux')
-
-        rows = list(conn.execute('select v from aux.t'))
-        self.assertEqual(rows, [('payload',)])
-
-    def test_serialize_ensure_conn(self):
-        conn = Connection(':memory:')
-        conn.close()
-        with self.assertRaises(OperationalError):
-            conn.serialize()
-
-        conn = Connection(':memory:')
-        data = Connection(':memory:').serialize()
-        conn.close()
-        with self.assertRaises(OperationalError):
-            conn.deserialize(data)
-
     def test_deserialize_requires_attached_schema(self):
         # deserialize() requires the target schema to already be attached.
         with Connection(':memory:') as src:
@@ -2718,6 +2693,18 @@ class TestBackup(BaseTestCase):
         self.assertEqual(rows, [('payload',)])
 
         conn.close()
+
+    def test_serialize_ensure_conn(self):
+        conn = Connection(':memory:')
+        conn.close()
+        with self.assertRaises(OperationalError):
+            conn.serialize()
+
+        conn = Connection(':memory:')
+        data = Connection(':memory:').serialize()
+        conn.close()
+        with self.assertRaises(OperationalError):
+            conn.deserialize(data)
 
 
 class TestStatementUsage(BaseTestCase):
