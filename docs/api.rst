@@ -453,6 +453,17 @@ Connection
       :return: cursor object.
       :rtype: :class:`Cursor`
 
+      Unlike :mod:`sqlite3`, this method does **not** issue an implicit
+      ``COMMIT`` before executing. If called inside an :meth:`atomic` or
+      :meth:`transaction` block the script runs within that transaction;
+      if called in autocommit mode each statement commits individually.
+      To run a script as a single atomic unit, wrap it explicitly:
+
+      .. code-block:: python
+
+          with db.atomic():
+              db.executescript(sql)
+
       Example:
 
       .. code-block:: python
@@ -1034,6 +1045,108 @@ Connection
 
          # Backup the contents of master to replica.db.
          master.backup_to_file('replica.db')
+
+   .. method:: serialize(name='main')
+
+      Serialize the named database to an in-memory bytes object containing
+      a valid SQLite database image.
+
+      :param str name: database name to serialize. Defaults to ``'main'``.
+      :return: serialized database image.
+      :rtype: bytes
+      :raises: :class:`MemoryError` if SQLite cannot allocate the buffer.
+
+      The returned bytes are identical to what SQLite would write to disk
+      for the same database, and are suitable for passing to
+      :meth:`~Connection.deserialize` on another connection or for writing
+      to a file.
+
+      Example:
+
+      .. code-block:: python
+
+         # Build an in-memory database.
+         src = connect(':memory:')
+         src.execute('create table users (id integer primary key, name text)')
+         src.executemany('insert into users (name) values (?)',
+                         [('alice',), ('bob',), ('carol',)])
+
+         # Snapshot the database as bytes.
+         snapshot = src.serialize()
+
+         # Write it to disk — it's a valid SQLite file.
+         with open('users.db', 'wb') as f:
+             f.write(snapshot)
+
+         # Or load it into another connection (see deserialize).
+         dest = connect(':memory:')
+         dest.deserialize(snapshot)
+
+   .. method:: deserialize(data, name='main')
+
+      Replace the contents of the named database with the given serialized
+      database image.
+
+      :param data: bytes-like object containing a valid SQLite database
+         image (as produced by :meth:`~Connection.serialize` or read from
+         a SQLite database file).
+      :type data: bytes, bytearray, or any buffer-protocol object
+      :param str name: database name to replace. Defaults to ``'main'``.
+         The target schema must be attached.
+      :raises: :class:`OperationalError` if the connection has an active
+         transaction, if the schema name is not attached, or if
+         deserialization otherwise fails.
+      :raises: :class:`MemoryError` if SQLite cannot allocate the backing
+         buffer.
+
+      The connection cannot have an active transaction when ``deserialize()``
+      is called. If ``in_transaction`` is true, the call raises
+      :class:`OperationalError` without modifying the database.
+
+      .. note::
+
+         ``deserialize()`` does **not** validate *data* at the time of the
+         call, it simply installs the buffer as the database's backing
+         store. If *data* is not a valid SQLite image, the error will
+         surface on the first query that accesses the schema, typically
+         as an :class:`OperationalError` with message ``file is not a
+         database``.
+
+      Example:
+
+      .. code-block:: python
+
+         # Load a database from a file into an in-memory connection for
+         # fast querying.
+         with open('users.db', 'rb') as f:
+             data = f.read()
+
+         db = connect(':memory:')
+         db.deserialize(data)
+
+         for row in db.execute('select name from users order by id'):
+             print(row[0])
+
+      Deserializing into an attached database:
+
+      .. code-block:: python
+
+         db = connect(':memory:')
+         db.execute("attach ':memory:' as snapshot")
+         db.deserialize(snapshot_bytes, name='snapshot')
+
+         # Query the attached database.
+         db.execute('select * from snapshot.users')
+
+      Round-trip pattern (useful for snapshotting, testing, etc):
+
+      .. code-block:: python
+
+         # Point-in-time snapshot.
+         snapshot = db.serialize()
+
+         # ... later, restore it ...
+         db.deserialize(snapshot)
 
    .. method:: blob_open(table, column, rowid, read_only=False, database=None)
 

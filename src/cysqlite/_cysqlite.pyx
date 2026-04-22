@@ -101,6 +101,10 @@ cdef class _TableFunctionImpl(object)
 SENTINEL = object()
 
 
+cdef raise_sqlite_error_sql(Connection conn, unicode msg, unicode sql):
+    raise_sqlite_error(conn, f'{msg}[{sql}] ')
+
+
 cdef raise_sqlite_error(Connection conn, unicode msg):
     cdef:
         int code = 0
@@ -316,7 +320,8 @@ cdef class Statement(object):
             if self.st:
                 sqlite3_finalize(self.st)
                 self.st = NULL
-            raise_sqlite_error(self.conn, 'error compiling statement: ')
+            raise_sqlite_error_sql(self.conn, 'error compiling statement: ',
+                                   self.sql)
 
         if self.st == NULL:
             raise ProgrammingError('Empty SQL statement.')
@@ -445,7 +450,8 @@ cdef class Statement(object):
 
             if rc != SQLITE_OK:
                 sqlite3_clear_bindings(self.st)
-                raise_sqlite_error(self.conn, 'error binding parameter: ')
+                raise_sqlite_error(self.conn,
+                                   'error binding parameter %s: ' % param)
 
         return 0
 
@@ -643,7 +649,7 @@ cdef class Cursor(object):
                 self.set_description()
         else:
             self.abort()
-            raise_sqlite_error(self.conn, 'error executing query: ')
+            raise_sqlite_error_sql(self.conn, 'error executing query: ', sql)
 
         if self.stmt.is_dml:
             # sqlite3_changes() is reliable at SQLITE_DONE. For DML that
@@ -689,7 +695,8 @@ cdef class Cursor(object):
                 self.stmt.reset()
             else:
                 self.abort()
-                raise_sqlite_error(self.conn, 'error executing query: ')
+                raise_sqlite_error_sql(self.conn, 'error executing query: ',
+                                       sql)
 
         self.lastrowid = self.conn.last_insert_rowid()
         self.finish()
@@ -724,7 +731,8 @@ cdef class Cursor(object):
                 rc = sqlite3_prepare_v2(self.conn.db, tail, -1, &st, &tail)
 
             if rc != SQLITE_OK:
-                raise_sqlite_error(self.conn, 'error executing query: ')
+                raise_sqlite_error_sql(self.conn, 'error executing query: ',
+                                       sql)
 
             rc = SQLITE_ROW
             while rc == SQLITE_ROW:
@@ -741,7 +749,8 @@ cdef class Cursor(object):
                 # actually have an error.
                 code = sqlite3_errcode(self.conn.db)
                 if code != 0:
-                    raise_sqlite_error(self.conn, 'error executing query: ')
+                    raise_sqlite_error_sql(
+                        self.conn, 'error executing query: ', sql)
 
             if st != NULL:
                 with nogil:
@@ -779,8 +788,9 @@ cdef class Cursor(object):
             self.finish()
             raise StopIteration
         else:
+            sql = self.stmt.sql
             self.abort()
-            raise_sqlite_error(self.conn, 'error executing query: ')
+            raise_sqlite_error_sql(self.conn, 'error executing query: ', sql)
 
         return row
 
@@ -1168,7 +1178,7 @@ cdef class Connection(_callable_context_manager):
         else:
             stmt.finalize()
             self.stmt_in_use.pop(id(stmt), None)
-            raise_sqlite_error(self, 'error executing query: ')
+            raise_sqlite_error_sql(self, 'error executing query: ', sql)
 
     def begin(self, lock=None):
         if lock:
@@ -1390,6 +1400,53 @@ cdef class Connection(_callable_context_manager):
             self.backup(dest, pages, name, progress, src_name)
         finally:
             dest.close()
+
+    def serialize(self, name='main'):
+        check_connection(self)
+        cdef:
+            bytes bname = encode(name)
+            sqlite3_int64 size = 0
+            unsigned char *data
+
+        data = sqlite3_serialize(self.db, PyBytes_AsString(bname), &size, 0)
+        if data == NULL:
+            if size == 0:
+                return b''  # Empty database.
+            raise MemoryError('sqlite3_serialize failed')
+        try:
+            return PyBytes_FromStringAndSize(<char *>data, size)
+        finally:
+            sqlite3_free(data)
+
+    def deserialize(self, data, name='main'):
+        check_connection(self)
+        cdef:
+            bytes bname = encode(name)
+            Py_buffer view
+            sqlite3_int64 sz
+            unsigned char *buf
+            int rc
+
+        if sqlite3_get_autocommit(self.db) == 0:
+            raise OperationalError('cannot deserialize: transaction active')
+
+        if PyObject_GetBuffer(data, &view, PyBUF_SIMPLE):
+            raise TypeError('data must be a bytes-like object')
+        try:
+            sz = view.len
+            buf = <unsigned char *>sqlite3_malloc64(sz)
+            if buf == NULL:
+                raise MemoryError('sqlite3_malloc64 failed')
+            memcpy(buf, view.buf, sz)
+        finally:
+            PyBuffer_Release(&view)
+
+        rc = sqlite3_deserialize(self.db, PyBytes_AsString(bname),
+                                 buf, sz, sz,
+                                 SQLITE_DESERIALIZE_FREEONCLOSE |
+                                 SQLITE_DESERIALIZE_RESIZEABLE)
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self, 'error deserializing: ')
 
     def blob_open(self, table, column, rowid, read_only=False, database=None):
         check_connection(self)

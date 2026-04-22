@@ -729,14 +729,20 @@ class TestExecute(BaseTestCase):
         curs.executescript(';;;')
 
     def test_execute_invalid_sql(self):
-        with self.assertRaises(OperationalError):
+        with self.assertRaises(OperationalError) as ctx:
             self.db.execute('select * from not_exists')
 
-        with self.assertRaises(OperationalError):
+        self.assertTrue('error compiling statement: [select * from not_exists]'
+                        in ctx.exception.args[0])
+
+        with self.assertRaises(OperationalError) as ctx:
             self.db.executemany('insert into not_exists (?)',
                                 [(1,), (2,)])
 
-        with self.assertRaises(OperationalError):
+        self.assertTrue('error compiling statement: [insert into not_exists (?'
+                        in ctx.exception.args[0])
+
+        with self.assertRaises(OperationalError) as ctx:
             self.db.executescript("""
                 BEGIN;
                 CREATE TABLE t1 (id integer primary key, c1 text);
@@ -747,6 +753,7 @@ class TestExecute(BaseTestCase):
             # Error occurred while txn is active, tx still active.
             self.assertEqual(sorted(self.db.get_tables()), ['t1'])
 
+        self.assertTrue('SELECT * FROM not_exist' in ctx.exception.args[0])
         self.assertTrue(self.db.in_transaction)
         self.db.rollback()
         self.assertEqual(sorted(self.db.get_tables()), [])
@@ -2576,6 +2583,110 @@ class TestBackup(BaseTestCase):
                 self.db.backup(dest, pages=1, progress=broken_progress)
 
         self.assertIn('fail', str(ctx.exception))
+
+    def test_serialize_deserialize(self):
+        with Connection(':memory:') as conn:
+            data = conn.serialize()
+            self.assertIsInstance(data, bytes)
+
+        with Connection(':memory:') as conn:
+            conn.execute('create table g(k)')
+            conn.executemany('insert into g(k) values (?)',
+                             [(v,) for v in 'abc'])
+            data = conn.serialize()
+            self.assertTrue(data.startswith(b'SQLite format 3'))
+
+        with Connection(':memory:') as conn:
+            conn.deserialize(data)
+            curs = conn.execute('select * from g order by k')
+            self.assertEqual([r[0] for r in curs], ['a', 'b', 'c'])
+
+            data2 = conn.serialize()
+
+        self.assertEqual(data, data2)
+
+    def test_deserialize_in_transaction(self):
+        conn = Connection(':memory:')
+        conn.execute('create table t (x)')
+        data = conn.serialize()
+
+        conn.begin()
+        try:
+            with self.assertRaises(OperationalError):
+                conn.deserialize(data)
+        finally:
+            conn.rollback()
+
+    def test_deserialize_unknown_schema(self):
+        conn = Connection(':memory:')
+        conn.execute('create table t (x)')
+        data = conn.serialize()
+
+        with self.assertRaises(OperationalError):
+            conn.deserialize(data, name='nonexistent')
+
+    def test_deserialize_preserves_schema(self):
+        conn = Connection(':memory:')
+        conn.execute('create table original (a)')
+        conn.execute('insert into original values (1)')
+
+        other = Connection(':memory:')
+        other.execute('create table replacement (b)')
+        other.execute('insert into replacement values (?)', ('hello',))
+        data = other.serialize()
+        other.close()
+
+        conn.deserialize(data)
+
+        # Original table is gone.
+        with self.assertRaises(OperationalError):
+            conn.execute('select * from original')
+
+        # Replacement table is present.
+        rows = list(conn.execute('select * from replacement'))
+        self.assertEqual(rows, [('hello',)])
+
+    def test_deserialize_bytearray(self):
+        with Connection(':memory:') as src:
+            src.execute('create table t (x)')
+            src.execute('insert into t values (?)', (42,))
+            data = src.serialize()
+
+        for buf in (bytearray(data), memoryview(data)):
+            conn = Connection(':memory:')
+            conn.deserialize(buf)
+            self.assertEqual(conn.execute('select * from t').fetchone(), (42,))
+
+    def test_deserialize_garbage_installs_but_fails_on_read(self):
+        conn = Connection(':memory:')
+        conn.deserialize(b'not a database' * 1024)
+        with self.assertRaises(DatabaseError):
+            conn.execute('select 1 from sqlite_master').fetchall()
+
+    def test_deserialize_attached_schema(self):
+        with Connection(':memory:') as src:
+            src.execute('create table t (v)')
+            src.execute('insert into t values (?)', ('payload',))
+            data = src.serialize()
+
+        conn = Connection(':memory:')
+        conn.execute("attach ':memory:' as aux")
+        conn.deserialize(data, name='aux')
+
+        rows = list(conn.execute('select v from aux.t'))
+        self.assertEqual(rows, [('payload',)])
+
+    def test_ensure_conn(self):
+        conn = Connection(':memory:')
+        conn.close()
+        with self.assertRaises(OperationalError):
+            conn.serialize()
+
+        conn = Connection(':memory:')
+        data = Connection(':memory:').serialize()
+        conn.close()
+        with self.assertRaises(OperationalError):
+            conn.deserialize(data)
 
 
 class TestStatementUsage(BaseTestCase):
