@@ -11,7 +11,8 @@ Module
 
 .. function:: connect(database, flags=None, timeout=5.0, vfs=None, \
        uri=False, cached_statements=100, extensions=True, \
-       row_factory=None, autoconnect=True, pragmas=None)
+       row_factory=None, autoconnect=True, pragmas=None, \
+       journal_mode=None)
 
    Open a :class:`Connection` to the provided database.
 
@@ -27,7 +28,12 @@ Module
    :param row_factory: Factory implementation for constructing rows, e.g. :class:`Row`
    :param bool autoconnect: Open connection when instantiated.
    :param dict pragmas: Optional mapping of pragmas to specify when connection
-      is opened, e.g. ``{'journal_mode': 'wal'}``.
+      is opened, e.g. ``{'journal_mode': 'wal'}``. The dict is copied
+      internally and is not mutated by the connection.
+   :param str journal_mode: Convenience shorthand for setting the
+      ``journal_mode`` pragma at connect time, e.g. ``'wal'``. Equivalent to
+      including ``'journal_mode'`` in *pragmas*; an explicit entry in
+      *pragmas* takes precedence.
    :return: Connection to database.
    :rtype: :class:`Connection`
 
@@ -100,7 +106,8 @@ Connection
 
 .. class:: Connection(database, flags=None, timeout=5.0, vfs=None, \
         uri=False, cached_statements=100, extensions=True, \
-        row_factory=None, autoconnect=True, pragmas=None)
+        row_factory=None, autoconnect=True, pragmas=None, \
+        journal_mode=None)
 
    Open a :class:`Connection` to the provided database.
 
@@ -115,7 +122,12 @@ Connection
    :param row_factory: Factory implementation for constructing rows, e.g. :class:`Row`
    :param bool autoconnect: Open connection when instantiated.
    :param dict pragmas: Optional mapping of pragmas to specify when connection
-      is opened, e.g. ``{'journal_mode': 'wal'}``.
+      is opened, e.g. ``{'journal_mode': 'wal'}``. The dict is copied
+      internally and is not mutated by the connection.
+   :param str journal_mode: Convenience shorthand for setting the
+      ``journal_mode`` pragma at connect time, e.g. ``'wal'``. Equivalent to
+      including ``'journal_mode'`` in *pragmas*; an explicit entry in
+      *pragmas* takes precedence.
 
    Default flags are ``SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE``. If ``uri``
    is set **or** the database name begins with ``'file:'``, ``SQLITE_OPEN_URI``
