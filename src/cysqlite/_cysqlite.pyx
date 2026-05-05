@@ -891,7 +891,7 @@ cdef class Connection(_callable_context_manager):
 
     def __init__(self, database, flags=None, timeout=5.0, vfs=None, uri=False,
                  cached_statements=100, extensions=True, row_factory=None,
-                 autoconnect=True, pragmas=None):
+                 autoconnect=True, pragmas=None, journal_mode=None):
         self.database = decode(database)
         self.flags = flags or 0
         self.timeout = timeout
@@ -900,7 +900,9 @@ cdef class Connection(_callable_context_manager):
         self.cached_statements = cached_statements
         self.extensions = extensions
         self.row_factory = row_factory
-        self.pragmas = pragmas or {}
+        self.pragmas = dict(pragmas or {})
+        if journal_mode is not None:
+            self.pragmas.setdefault('journal_mode', journal_mode)
         self.print_callback_tracebacks = False
         self._callback_error = None
         self.converters = {}
@@ -3371,7 +3373,7 @@ sqlite_version_info = tuple(int(i) if i.isdigit() else i
 
 def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
             cached_statements=100, extensions=True, row_factory=None,
-            autoconnect=True, pragmas=None):
+            autoconnect=True, pragmas=None, journal_mode=None):
     """Open a connection to an SQLite database."""
     conn = Connection(database,
                       flags=flags,
@@ -3382,7 +3384,8 @@ def connect(database, flags=None, timeout=5.0, vfs=None, uri=False,
                       extensions=extensions,
                       row_factory=row_factory,
                       autoconnect=autoconnect,
-                      pragmas=pragmas)
+                      pragmas=pragmas,
+                      journal_mode=journal_mode)
     return conn
 
 

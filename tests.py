@@ -164,6 +164,35 @@ class TestConnection(BaseTestCase):
         self.assertEqual(db.pragma('cache_size'), -1000)
         db.close()
 
+    def test_journal_mode(self):
+        path = '/tmp/cysqlite-jm-test.db'
+        for filename in glob.glob(path + '*'):
+            os.unlink(filename)
+        try:
+            db = connect(path, journal_mode='wal')
+            self.assertEqual(db.pragma('journal_mode'), 'wal')
+            db.close()
+
+            db = connect(path, journal_mode='wal')
+            self.assertEqual(db.pragma('journal_mode'), 'wal')
+            db.close()
+
+            # An explicit pragma entry wins over the journal_mode shorthand.
+            db = connect(path, journal_mode='wal',
+                         pragmas={'journal_mode': 'delete'})
+            self.assertEqual(db.pragma('journal_mode'), 'delete')
+            db.close()
+
+            # The caller's pragmas dict must not be mutated.
+            user_pragmas = {'cache_size': -500}
+            db = connect(path, journal_mode='wal', pragmas=user_pragmas)
+            self.assertEqual(db.pragma('journal_mode'), 'wal')
+            self.assertEqual(user_pragmas, {'cache_size': -500})
+            db.close()
+        finally:
+            for filename in glob.glob(path + '*'):
+                os.unlink(filename)
+
     def test_open_close(self):
         db = Connection(':memory:', autoconnect=False)
         self.assertTrue(db.is_closed())
