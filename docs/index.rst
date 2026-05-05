@@ -67,6 +67,7 @@ Example usage:
    :caption: Contents:
 
    installation
+   migration
    sqlite-notes
    api
    utils
