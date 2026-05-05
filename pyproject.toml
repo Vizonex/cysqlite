@@ -27,7 +27,7 @@ package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
-cysqlite = ["*.pxd", "*.pxi", "*.c"]
+cysqlite = ["*.pxd", "*.pxi", "*.c", "*.pyi", "py.typed"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cysqlite.__version__" }
