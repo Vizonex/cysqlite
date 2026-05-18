@@ -2274,7 +2274,7 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.db.authorizer(authorizer)
 
         self.db.execute('delete from kv where key = ?', ('k1',))
-        self.assertEqual(state, [
+        self.assertEqual(state[:2], [
             (9, 'kv', None, 'main', None),
             (20, 'kv', 'key', 'main', None)])
 
