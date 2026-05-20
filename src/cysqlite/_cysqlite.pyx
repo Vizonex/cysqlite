@@ -1217,7 +1217,9 @@ cdef class Connection(_callable_context_manager):
 
     @property
     def in_transaction(self):
-        check_connection(self)
+        # A closed connection cannot be in txn, so return False if closed.
+        if self.db == NULL:
+            return False
         return not sqlite3_get_autocommit(self.db)
 
     def status(self, flag):

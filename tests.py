@@ -233,6 +233,16 @@ class TestConnection(BaseTestCase):
             txn.__exit__(None, None, None)
             self.assertTrue(db.close())
 
+    def test_in_transaction_on_closed_connection(self):
+        db = Connection(':memory:', autoconnect=False)
+        self.assertFalse(db.in_transaction)
+        db.connect()
+        self.assertFalse(db.in_transaction)
+        db.begin()
+        self.assertTrue(db.in_transaction)
+        db.close(force=True)
+        self.assertFalse(db.in_transaction)
+
     def test_force_close(self):
         db = Connection(self.filename)
         db.execute('create table g(k)')
