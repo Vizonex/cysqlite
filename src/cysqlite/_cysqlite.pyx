@@ -1010,6 +1010,7 @@ cdef class Connection(_callable_context_manager):
             int flags = self.flags or (SQLITE_OPEN_READWRITE |
                                        SQLITE_OPEN_CREATE)
             int rc
+            int status
 
         self._transaction_depth = 0
 
@@ -1032,7 +1033,15 @@ cdef class Connection(_callable_context_manager):
             raise OperationalError(f'error opening database: {errmsg}.')
 
         if self.extensions:
-            rc = sqlite3_enable_load_extension(self.db, 1)
+            # Only enable C-API sqlite3_load_extension() and the connection
+            # load_extension() method - do not enable the sql-callable
+            # load_extension() function. If you want this, call
+            # enable_load_extension(True).
+            rc = sqlite3_db_config(
+                self.db,
+                SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
+                1,
+                &status)
             if rc != SQLITE_OK:
                 errmsg = decode(sqlite3_errmsg(self.db))
                 sqlite3_close_v2(self.db)
@@ -1678,6 +1687,13 @@ cdef class Connection(_callable_context_manager):
         self.timeout = timeout
         cdef sqlite3_int64 n = int(self.timeout * 1000)
         sqlite3_busy_handler(self.db, _aggressive_busy_handler, <void *>n)
+
+    def enable_load_extension(self, enabled=True):
+        check_connection(self)
+        cdef int rc = sqlite3_enable_load_extension(self.db, enabled)
+        if rc != SQLITE_OK:
+            raise_sqlite_error(self, 'error calling enable_load_extension: ')
+        return enabled
 
     def optimize(self, debug=False, run_tables=True, set_limit=True,
                  check_table_sizes=False, dry_run=False):

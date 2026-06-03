@@ -2546,6 +2546,20 @@ class TestDatabaseSettings(BaseTestCase):
             ('main', ''),
             ('addl', '/tmp/cysqlite.db')])
 
+    def test_load_extension_sql_disabled_default(self):
+        with self.assertRaises(OperationalError) as cm:
+            self.db.execute('select load_extension(\'/x/y\')')
+        self.assertIn('not authorized', str(cm.exception).lower())
+
+        with self.assertRaises(OperationalError) as cm:
+            self.db.load_extension('/x/y')
+        self.assertNotIn('not authorized', str(cm.exception).lower())
+
+        self.db.enable_load_extension()
+        with self.assertRaises(OperationalError) as cm:
+            self.db.execute('select load_extension(\'/x/y\')')
+        self.assertNotIn('not authorized', str(cm.exception).lower())
+
     def test_optimize(self):
         conn = Connection('/tmp/cysqlite.db', autoconnect=True)
         conn.execute('create table k (id integer not null primary key, '
