@@ -2740,10 +2740,13 @@ cdef class Blob(object):
 _io.RawIOBase.register(Blob)
 
 # The cysqlite_vtab struct embeds the base sqlite3_vtab struct, and adds a
-# field to store a reference to the Python implementation.
+# field to store a reference to the Python implementation and a borrowed ptr to
+# the parent Connection. The module (and the _TableFunctionImpl that owns the
+# connection ref) outlives every vtab created from it.
 ctypedef struct cysqlite_vtab:
     sqlite3_vtab base
     void *table_func_cls
+    void *conn
 
 
 # Like cysqlite_vtab, the cysqlite_cursor embeds the base sqlite3_vtab_cursor
@@ -2762,6 +2765,35 @@ cdef void set_vtab_error(sqlite3_vtab *pVtab, const char *msg) noexcept:
     if pVtab.zErrMsg:
         sqlite3_free(pVtab.zErrMsg)
     pVtab.zErrMsg = sqlite3_mprintf('%s', msg)
+
+
+cdef inline Connection _vtab_connection(cysqlite_vtab *pVtab):
+    # Return the owning Conn from a vtab. The Connection is held alive via the
+    # _TableFunctionImpl, whose lifetime is bound to the module registration on
+    # the conn, so the ptr is either valid or NULL.
+    if pVtab == NULL or pVtab.conn == NULL:
+        return None
+    return <Connection>pVtab.conn
+
+
+cdef inline void _vtab_capture_exc(sqlite3_vtab *pBase, Connection conn,
+                                   object table_func_cls, object exc,
+                                   bytes prefix) noexcept with gil:
+    # Stash `exc` on the connection for propagation (__cause__), surface the
+    # error via the vTab's zErrMsg and optionally print a trace. Used by
+    # cyNext, cyFilter and cyUpdate so user exceptions don't get swallowed
+    # behind a generic OperationalError.
+    cdef bytes msg
+    if conn is not None:
+        conn._callback_error = exc
+    if table_func_cls is not None and \
+       getattr(table_func_cls, 'print_tracebacks', False):
+        traceback.print_exc()
+    try:
+        msg = prefix + encode('%s: %s' % (type(exc), exc))
+    except Exception:
+        msg = prefix + b'(error formatting exception)'
+    set_vtab_error(pBase, <const char *>msg)
 
 
 # We define an xConnect function, but leave xCreate NULL so that the
@@ -2787,22 +2819,29 @@ cdef int cyConnect(sqlite3 *db, void *pAux, int argc, const char *const*argv,
                         table_func_cls.get_table_columns_declaration())
     except Exception as exc:
         err = encode(f'Failed to get schema: {exc}')
-        pzErr[0] = sqlite3_mprintf('%s', err)
+        pzErr[0] = sqlite3_mprintf('%s', <const char *>err)
         return SQLITE_ERROR
 
     rc = sqlite3_declare_vtab(db, <const char *>schema)
-    if rc == SQLITE_OK:
-        pNew = <cysqlite_vtab *>sqlite3_malloc(sizeof(pNew[0]))
-        if pNew == NULL:
-            return SQLITE_NOMEM
+    if rc != SQLITE_OK:
+        err = encode('sqlite3_declare_vtab failed: %s' %
+                     decode(sqlite3_errmsg(db)))
+        pzErr[0] = sqlite3_mprintf('%s', <const char *>err)
+        return rc
 
-        memset(<char *>pNew, 0, sizeof(pNew[0]))
-        ppVtab[0] = &(pNew.base)
+    pNew = <cysqlite_vtab *>sqlite3_malloc(sizeof(pNew[0]))
+    if pNew == NULL:
+        pzErr[0] = sqlite3_mprintf('out of memory allocating vtab')
+        return SQLITE_NOMEM
 
-        pNew.table_func_cls = <void *>table_func_cls
-        Py_INCREF(table_func_cls)
+    memset(<char *>pNew, 0, sizeof(pNew[0]))
+    ppVtab[0] = &(pNew.base)
 
-    return rc
+    pNew.table_func_cls = <void *>table_func_cls
+    pNew.conn = <void *>impl.conn
+    Py_INCREF(table_func_cls)
+
+    return SQLITE_OK
 
 
 cdef int cyDisconnect(sqlite3_vtab *pBase) noexcept with gil:
@@ -2882,15 +2921,61 @@ cdef int cyClose(sqlite3_vtab_cursor *pBase) noexcept with gil:
 
 # Iterate once, advancing the cursor's index and assigning the row data to the
 # `row_data` field on the cysqlite_cursor struct.
+cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
+                    bint advance_idx) except -1:
+    # Validate the shape of a row produced by iterate() and store it on the
+    # cursor. Returns 1 on success, 0 if iteration stopped, and raises an exc
+    # if there's a shape mismatch.
+    # Valid rows can be (c0, c1, ...) OR
+    # (rowid, (c0, c1, ...)) when subclass sets with_rowid=True.
+    cdef:
+        tuple row
+        tuple tmp
+        int ncols = table_func._ncols
+        bint with_rowid = getattr(type(table_func), 'with_rowid', False)
+
+    if raw is None:
+        pCur.stopped = True
+        return 0
+
+    if not isinstance(raw, tuple):
+        raise TypeError(f'iterate() must return a tuple')
+
+    tmp = <tuple>raw
+    if with_rowid:
+        if len(tmp) != 2 or not isinstance(tmp[1], tuple) or \
+           len(<tuple>tmp[1]) != ncols:
+            raise ValueError('iterate() must return (rowid, tuple of %s cols)'
+                             % ncols)
+        pCur.idx = tmp[0]
+        row = <tuple>tmp[1]
+    else:
+        if len(tmp) != ncols:
+            raise ValueError('iterate() must return (tuple of %s cols)'
+                             % ncols)
+        row = tmp
+        if advance_idx:
+            pCur.idx += 1
+
+    Py_INCREF(row)
+    pCur.row_data = <void *>row
+    pCur.stopped = False
+    return 1
+
+
 cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
     cdef:
         cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        cysqlite_vtab *pVtab
         object table_func
-        tuple result
+        Connection conn
+        object raw
 
     if pCur == NULL or pCur.table_func == NULL:
         return SQLITE_ERROR
 
+    pVtab = <cysqlite_vtab *>pBase.pVtab
+    conn = _vtab_connection(pVtab)
     table_func = <object>pCur.table_func
 
     if pCur.row_data != NULL:
@@ -2898,31 +2983,23 @@ cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
         pCur.row_data = NULL
 
     try:
-        result = tuple(table_func.iterate(pCur.idx))
+        raw = table_func.iterate(pCur.idx)
     except StopIteration:
         pCur.stopped = True
         return SQLITE_OK
     except Exception as exc:
-        if table_func.print_tracebacks:
-            traceback.print_exc()
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
+                          b'iterate() raised: ')
         pCur.stopped = True
         return SQLITE_ERROR
 
-    if result is not None:
-        if len(result) == 2 and isinstance(result[1], tuple):
-            pCur.idx = result[0]
-            result = result[1]
-        elif len(result) == table_func._ncols:
-            pCur.idx += 1
-        else:
-            # Provided wrong number or type of args.
-            return SQLITE_ERROR
-
-        Py_INCREF(result)
-        pCur.row_data = <void *>result
-        pCur.stopped = False
-    else:
+    try:
+        _store_row(pCur, table_func, raw, True)
+    except Exception as exc:
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
+                          b'iterate() returned invalid row: ')
         pCur.stopped = True
+        return SQLITE_ERROR
 
     return SQLITE_OK
 
@@ -2979,16 +3056,26 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
                   const char *idxStr, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
         cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        cysqlite_vtab *pVtab
         object table_func
+        Connection conn
         dict query = {}
         int idx
+        object raw
         tuple py_values
-        tuple row_data
         list params
 
     if pCur == NULL or pCur.table_func == NULL:
         return SQLITE_ERROR
 
+    # SQLite reuses one cursor across multiple xFilter calls (e.g. a table
+    # function on the inner side of a join / correlated subq). Reset the
+    # iteration index so each filter pass restarts iterate() from row 0 rather
+    # than from the stale count left by the previous pass.
+    pCur.idx = 0
+
+    pVtab = <cysqlite_vtab *>pBase.pVtab
+    conn = _vtab_connection(pVtab)
     table_func = <object>pCur.table_func
 
     if (idxStr == NULL or argc == 0) and table_func._nparams:
@@ -3007,9 +3094,9 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
 
     try:
         table_func.initialize(**query)
-    except:
-        if table_func.print_tracebacks:
-            traceback.print_exc()
+    except Exception as exc:
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
+                          b'initialize() raised: ')
         return SQLITE_ERROR
 
     # Get first row of data.
@@ -3019,26 +3106,23 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
 
     pCur.stopped = False
     try:
-        row_data = tuple(table_func.iterate(0))
+        raw = table_func.iterate(0)
     except StopIteration:
         pCur.stopped = True
         return SQLITE_OK
     except Exception as exc:
-        if table_func.print_tracebacks:
-            traceback.print_exc()
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
+                          b'iterate() raised: ')
         pCur.stopped = True
         return SQLITE_ERROR
 
-    if row_data is not None:
-        if len(row_data) == 2 and isinstance(row_data[1], tuple):
-            pCur.idx = row_data[0]
-            row_data = row_data[1]
-        else:
-            pCur.idx += 1
-        Py_INCREF(row_data)
-        pCur.row_data = <void *>row_data
-    else:
+    try:
+        _store_row(pCur, table_func, raw, True)
+    except Exception as exc:
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
+                          b'iterate() returned invalid row: ')
         pCur.stopped = True
+        return SQLITE_ERROR
 
     return SQLITE_OK
 
@@ -3108,35 +3192,32 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
 # Handle INSERT / UPDATE / DELETE operations.
 cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
                   sqlite3_int64 *pRowid) noexcept with gil:
+    # xUpdate:
+    # argc == 1 -> DELETE, argv[0] = rowid.
+    # argc > 1, argv[0] is SQLITE_NULL, INSERT, argv[1] is new rowid or NULL.
+    # argc > 1, argv[0] is non-NULL, UPDATE, argv[0] is old rowid.
     cdef:
         cysqlite_vtab *pVtab = <cysqlite_vtab *>pBase
         object table_func_cls
         object table_func
+        Connection conn
         tuple py_values
-        sqlite3_int64 new_rowid
 
     if pVtab == NULL or pVtab.table_func_cls == NULL:
-        set_vtab_error(pBase, encode('Invalid vtab'))
+        set_vtab_error(pBase, b'Invalid vtab')
         return SQLITE_ERROR
 
     table_func_cls = <object>pVtab.table_func_cls
+    conn = _vtab_connection(pVtab)
 
     py_values = sqlite_to_python(argc, argv)
     try:
         table_func = table_func_cls()
 
         # Determine operation type:
-        # DELETE: argc == 1
-        # INSERT: argc > 1 and argv[0] is NULL
-        # UPDATE: argc > 1 and argv[0] is not NULL
         if argc == 1:
-            # DELETE operation
-            rowid = py_values[0]
-            result = table_func.delete(rowid)
+            result = table_func.delete(py_values[0])
         elif py_values[0] is None:
-            # INSERT operation (argv[0] is NULL)
-            # argv[1] is new rowid (or NULL for auto-generate)
-            # argv[2:] are the column values
             new_rowid_val = py_values[1] if len(py_values) > 1 else None
             column_values = py_values[2:] if len(py_values) > 2 else []
 
@@ -3145,20 +3226,16 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
             if pRowid != NULL and result is not None:
                 pRowid[0] = <sqlite3_int64>result
         else:
-            # UPDATE operation (argv[0] is old rowid)
             old_rowid = py_values[0]
             new_rowid_val = py_values[1] if len(py_values) > 1 else old_rowid
             column_values = py_values[2:] if len(py_values) > 2 else []
 
             result = table_func.update(old_rowid, new_rowid_val, column_values)
-
     except NotImplementedError:
-        set_vtab_error(pBase, encode('Operation not implemented'))
+        set_vtab_error(pBase, b'Operation not implemented')
         return SQLITE_READONLY
     except Exception as exc:
-        if table_func_cls.print_tracebacks:
-            traceback.print_exc()
-        set_vtab_error(pBase, encode(f'Update failed: {exc}'))
+        _vtab_capture_exc(pBase, conn, table_func_cls, exc, b'update failed: ')
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -3172,17 +3249,19 @@ cdef class _TableFunctionImpl(object):
     cdef:
         sqlite3_module module
         object table_function
+        Connection conn
+        unicode name  # Resolved during class-construction.
 
-    def __cinit__(self, table_function):
+    def __cinit__(self, table_function, Connection conn):
         self.table_function = table_function
-        if not table_function.name:
-            table_function.name = table_function.__name__
+        self.conn = conn
+        self.name = table_function.name or table_function.__name__
 
     cdef create_module(self, Connection conn):
         check_connection(conn)
 
         cdef:
-            bytes name = encode(self.table_function.name)
+            bytes name = encode(self.name)
             sqlite3 *db = conn.db
             int rc
 
@@ -3208,7 +3287,8 @@ cdef class _TableFunctionImpl(object):
         self.module.xFindFunction = NULL
         self.module.xRename = NULL
 
-        # Create the SQLite virtual table.
+        # Increment refcount before handing ptr to SQLite.
+        Py_INCREF(self)
         rc = sqlite3_create_module_v2(
             db,
             <const char *>name,
@@ -3216,9 +3296,11 @@ cdef class _TableFunctionImpl(object):
             <void *>self,
             cyDestroy)
         if rc != SQLITE_OK:
-            return False
+            Py_DECREF(self)
+            raise_sqlite_error(
+                conn,
+                'failed to register table fucntion %s: ' % self.name)
 
-        Py_INCREF(self)
         return True
 
 
@@ -3228,19 +3310,24 @@ class TableFunction(object):
 
     Required:
     - columns: list of column names or (name, type) tuples
-    - params: list of parameter names (optional, for table-valued functions)
-    - name: table name
     - initialize(**filters): called once per query with parameter values
     - iterate(idx): yields row tuples, raise StopIteration when done
 
+    Optional:
+    - params: list of parameter names (optional, for table-valued functions),
+        each becomes a hidden SQL column that can be supplied as a positional
+        argument in the FROM clause, e.g. FROM my_tbl('p1', 'p2').
+    - name: table name
+
     Optional methods for writable tables:
-    - insert(rowid, values): handle INSERT, return new rowid
-    - update(old_rowid, new_rowid, values): handle UPDATE
-    - delete(rowid): handle DELETE
+    - insert(rowid, values): handle INSERT, return rowid.
+    - update(old_rowid, new_rowid, values): handle UPDATE, return None.
+    - delete(rowid): handle DELETE, return None.
     """
     columns = None
     params = None
     name = None
+    with_rowid = False
     print_tracebacks = False
     _ncols = 0
     _nparams = 0
@@ -3249,51 +3336,50 @@ class TableFunction(object):
     def register(cls, Connection conn):
         if cls.columns is None:
             raise ProgrammingError(f'{cls.__name__}.columns must be defined')
-        for col in cls.columns:
-            if isinstance(col, tuple) and len(col) != 2:
-                raise ProgrammingError(
-                    f'{cls.__name__}.columns entries must be strings or '
-                    f'(name, type) 2-tuples, got {col!r}')
-            elif not isinstance(col, (str, tuple)):
-                raise ProgrammingError(
-                    f'{cls.__name__}.columns entries must be strings or '
-                    f'(name, type) 2-tuples, got {col!r}')
-        if cls.params is not None:
-            if not isinstance(cls.params, (list, tuple)):
-                raise ProgrammingError(
-                    f'{cls.__name__}.params must be a list or tuple')
 
-        cdef _TableFunctionImpl impl = _TableFunctionImpl(cls)
+        cdef _TableFunctionImpl impl = _TableFunctionImpl(cls, conn)
         impl.create_module(conn)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        if cls.columns is not None:
+            if not isinstance(cls.columns, (list, tuple)):
+                raise ProgrammingError(
+                    f'{cls.__name__}.columns must be a list or tuple')
+            for col in cls.columns:
+                if isinstance(col, str):
+                    continue
+                if isinstance(col, tuple) and len(col) == 2 \
+                        and all(isinstance(p, str) for p in col):
+                    continue
+                raise ProgrammingError(
+                    f'{cls.__name__}.columns entries must be strings or '
+                    f'(name, type) 2-tuples of strings, got {col!r}')
+        if cls.params is not None and not isinstance(cls.params, (list, tuple)):
+            raise ProgrammingError(
+                f'{cls.__name__}.params must be a list or tuple')
         cls._ncols = len(cls.columns) if cls.columns is not None else 0
         cls._nparams = len(cls.params) if cls.params is not None else 0
 
     def initialize(self, **filters):
         """
-        Initialize the table function with filter parameters.
-        Called once per query before iteration begins.
+        Set up iteration state for one query.
+
+        Called once per query after the SQL parameters are bound. The
+        ``filters`` keyword arguments correspond to the names declared in
+        ``params``, missing parameters given as ``None``.
         """
         raise NotImplementedError
 
     def iterate(self, idx):
         """
-        Generate row data for the given index.
+        Return one row tuple of length ``len(columns)``.
 
-        Args:
-            idx: 0-based row index
+        Called once per row, ``idx`` is the current 0-based row index. Raise
+        ``StopIteration`` to indicate no more data.
 
-        Returns:
-            tuple of values matching the columns definition, eg.
-            (column, data, here)
-
-            OR a 2-tuple of
-            (rowid, (column, data, here)).
-
-        Raises:
-            StopIteration when no more rows
+        If the subclass sets ``with_rowid = True``, this method must return
+        a 2-tuple of ``(rowid, row_tuple)`` instead.
         """
         raise NotImplementedError
 
@@ -3301,15 +3387,8 @@ class TableFunction(object):
         """
         Handle INSERT operation.
 
-        Args:
-            rowid: requested rowid (may be None for auto-generate)
-            values: list of column values
-
-        Returns:
-            The rowid of the inserted row
-
-        Raises:
-            NotImplementedError if INSERT not supported
+        ``rowid`` is the requested rowid (or None for auto-generate). Return
+        the new row's ``rowid``.
         """
         raise NotImplementedError("INSERT not supported")
 
@@ -3317,13 +3396,7 @@ class TableFunction(object):
         """
         Handle UPDATE operation.
 
-        Args:
-            old_rowid: rowid of row being updated
-            new_rowid: new rowid (usually same as old_rowid)
-            values: list of new column values
-
-        Raises:
-            NotImplementedError if UPDATE not supported
+        No return value.
         """
         raise NotImplementedError("UPDATE not supported")
 
@@ -3331,11 +3404,7 @@ class TableFunction(object):
         """
         Handle DELETE operation.
 
-        Args:
-            rowid: rowid of row to delete
-
-        Raises:
-            NotImplementedError if DELETE not supported
+        No return value.
         """
         raise NotImplementedError("DELETE not supported")
 

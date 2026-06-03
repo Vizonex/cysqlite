@@ -3459,6 +3459,7 @@ class MemStore(TableFunction):
         ('key', 'TEXT'),
         ('value', 'TEXT')]
     params = []
+    with_rowid = True
 
     _data = {}
     _next_id = 1
@@ -3641,12 +3642,15 @@ class TestTableFunction(BaseTestCase):
                             'regex_search.match '
                             'FROM posts, regex_search(?, posts.msg)',
                             (r'[\w]+@[\w]+\.\w{2,3}',))
+        # The table function cursor is re-filtered once per outer row, and each
+        # filter pass restarts iteration (and thus the implicit per-scan rowid)
+        # at 1.
         self.assertEqual(list(curs), [
             (1, 1, 'foo@example.fap'),
             (1, 2, 'nuggie@example.fap'),
-            (2, 3, 'baz@example.com'),
-            (2, 4, 'charlie@crappyblog.com'),
-            (2, 5, 'huey@example.com'),
+            (2, 1, 'baz@example.com'),
+            (2, 2, 'charlie@crappyblog.com'),
+            (2, 3, 'huey@example.com'),
         ])
 
     def test_writeable(self):
@@ -3826,6 +3830,149 @@ class TestTableFunction(BaseTestCase):
             for v in range(n + 1):
                 expected.append((n, v))
         self.assertEqual(sorted(rows), sorted(expected))
+
+
+class TestTableFunctionRefactor(BaseTestCase):
+    filename = ':memory:'
+
+    def test_columns_required_at_definition_time(self):
+        # Subclasses that set columns to garbage should fail at the
+        # class statement, not later at register() time.
+        with self.assertRaises(ProgrammingError):
+            class Bad1(TableFunction):
+                columns = [123]  # not a string and not a 2-tuple
+                def initialize(self): pass
+                def iterate(self, idx): raise StopIteration
+
+        with self.assertRaises(ProgrammingError):
+            class Bad2(TableFunction):
+                columns = [('a', 'INTEGER', 'extra')]  # 3-tuple
+                def initialize(self): pass
+                def iterate(self, idx): raise StopIteration
+
+        with self.assertRaises(ProgrammingError):
+            class Bad3(TableFunction):
+                columns = 'a,b,c'  # not a list/tuple
+                def initialize(self): pass
+                def iterate(self, idx): raise StopIteration
+
+    def test_params_must_be_sequence(self):
+        with self.assertRaises(ProgrammingError):
+            class Bad(TableFunction):
+                columns = ['a']
+                params = 'not-a-list'
+
+    def test_register_without_columns_raises(self):
+        class NoCols(TableFunction):
+            # columns intentionally unset on the subclass
+            pass
+        with self.assertRaises(ProgrammingError):
+            NoCols.register(self.db)
+
+    def test_register_does_not_mutate_class(self):
+        # The class's `name` attribute must remain None when not set;
+        # the impl resolves the default name without writing it back.
+        class Anon(TableFunction):
+            columns = ['v']
+            def initialize(self): pass
+            def iterate(self, idx): raise StopIteration
+
+        self.assertIsNone(Anon.name)
+        Anon.register(self.db)
+        self.assertIsNone(Anon.name)
+        # The function is reachable under its class name.
+        list(self.db.execute('select * from Anon'))
+
+    def assertChainCause(self, tbl_func, exc_type, err_msg):
+        tbl_func.register(self.db)
+        with self.assertRaises(OperationalError) as cm:
+            list(self.db.execute('select * from %s' % tbl_func.name))
+
+        self.assertIsInstance(cm.exception.__cause__, exc_type)
+        if err_msg is not None:
+            self.assertEqual(str(cm.exception.__cause__), err_msg)
+
+    def test_iterate_exception_chains_as_cause(self):
+        class Boom(TableFunction):
+            name = 'boom'
+            columns = ['v']
+            def initialize(self): self.i = 0
+            def iterate(self, idx):
+                if self.i == 0:
+                    self.i += 1
+                    return (1,)
+                raise RuntimeError('boom from iterate')
+
+        self.assertChainCause(Boom, RuntimeError, 'boom from iterate')
+
+    def test_initialize_exception_chains_as_cause(self):
+        class BadInit(TableFunction):
+            name = 'bad_init'
+            columns = ['v']
+            def initialize(self): raise ValueError('init fail')
+            def iterate(self, idx): raise StopIteration
+
+        self.assertChainCause(BadInit, ValueError, 'init fail')
+
+    def test_iterate_wrong_shape_chains_as_cause(self):
+        # iterate() returning the wrong number of values should now
+        # produce a clear ValueError chained as __cause__, not a silent
+        # SQLITE_ERROR.
+        class WrongShape(TableFunction):
+            name = 'wrong_shape'
+            columns = ['a', 'b']  # 2 columns expected
+            def initialize(self): pass
+            def iterate(self, idx):
+                return (1, 2, 3)  # 3 values
+
+        self.assertChainCause(WrongShape, ValueError, None)
+
+    def test_iterate_non_tuple_chains_as_cause(self):
+        class BareValue(TableFunction):
+            name = 'bare_value'
+            columns = ['a']
+            def initialize(self): self.done = False
+            def iterate(self, idx):
+                if self.done: raise StopIteration
+                self.done = True
+                return 42  # Forgot the trailing comma.
+
+        self.assertChainCause(BareValue, TypeError, None)
+
+    def test_with_rowid_validates_shape(self):
+        class BadRowid(TableFunction):
+            name = 'bad_rowid'
+            columns = ['a']
+            with_rowid = True
+            def initialize(self): pass
+            def iterate(self, idx):
+                return (42,)  # not a (rowid, tuple) pair
+
+        self.assertChainCause(BadRowid, ValueError, None)
+
+    def test_idx_driven_function_in_join(self):
+        # SQLite reuses one cursor across xFilter calls when a table function
+        # is on the inner side of a join. Regression: cyFilter did not reset
+        # the iteration index, so an idx-driven function returned only its
+        # first row on every filter pass after the first.
+        class IdxCounter(TableFunction):
+            name = 'idx_counter'
+            columns = ['value']
+            params = ['n']
+            def initialize(self, n=0):
+                self.n = n
+            def iterate(self, idx):
+                if idx >= self.n:
+                    raise StopIteration
+                return (idx,)
+
+        IdxCounter.register(self.db)
+        self.db.execute('create table t (x)')
+        self.db.executemany('insert into t values (?)', [(1,), (2,), (3,)])
+        got = sorted(self.db.execute(
+            'select t.x, c.value from t, idx_counter(t.x) as c').fetchall())
+        self.assertEqual(got, [(1, 0), (2, 0), (2, 1),
+                               (3, 0), (3, 1), (3, 2)])
 
 
 class TestRankUDFs(BaseTestCase):
