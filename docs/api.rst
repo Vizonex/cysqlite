@@ -24,7 +24,10 @@ Module
    :param str vfs: VFS to use, optional.
    :param bool uri: Allow connecting using a URI.
    :param int cached_statements: Size of statement cache.
-   :param bool extensions: Support run-time loadable extensions.
+   :param bool extensions: Support run-time loadable extensions via the C API,
+       exposed at :meth:`Connection.load_extension`. SQLite's load_extension()
+       builtin function is still disabled - use :meth:`~Connection.enable_load_extension`
+       to enable.
    :param row_factory: Factory implementation for constructing rows, e.g. :class:`Row`
    :param bool autoconnect: Open connection when instantiated.
    :param dict pragmas: Optional mapping of pragmas to specify when connection
@@ -118,7 +121,10 @@ Connection
    :param str vfs: VFS to use, optional.
    :param bool uri: Allow connecting using a URI.
    :param int cached_statements: Size of statement cache.
-   :param bool extensions: Support run-time loadable extensions.
+   :param bool extensions: Support run-time loadable extensions via the C API,
+       exposed at :meth:`Connection.load_extension`. SQLite's load_extension()
+       builtin function is still disabled - use :meth:`~Connection.enable_load_extension`
+       to enable.
    :param row_factory: Factory implementation for constructing rows, e.g. :class:`Row`
    :param bool autoconnect: Open connection when instantiated.
    :param dict pragmas: Optional mapping of pragmas to specify when connection
@@ -358,6 +364,9 @@ Connection
           database was already open returns ``False``.
       :rtype: bool
       :raises: :class:`OperationalError` if opening database fails.
+
+      All previously-registered user-defined functions, aggregates, window
+      functions and collations will be restored.
 
    .. method:: close(force=False)
 
@@ -1632,6 +1641,10 @@ Connection
          # Now concurrent writers will use jittered retries instead of a
          # simple flat sleep, reducing lock contention.
 
+   .. method:: enable_load_extension(enabled)
+
+      :param bool enabled: Enable or disable the SQLite builtin ``load_extension`` function.
+
    .. method:: optimize(debug=False, run_tables=True, set_limit=True, check_table_sizes=False, dry_run=False)
 
       :param bool debug: debug-mode, do not actually perform any optimizations,
@@ -1788,7 +1801,7 @@ Connection
    .. method:: set_load_extension(enabled)
    .. method:: get_load_extension()
 
-      Enable or disable run-time loadable extensions.
+      Enable or disable run-time loadable extensions via the C APIs.
 
    .. method:: set_foreign_keys_enabled(enabled)
    .. method:: get_foreign_keys_enabled()
