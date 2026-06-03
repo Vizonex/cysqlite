@@ -881,7 +881,7 @@ cdef class Connection(_callable_context_manager):
         bytes _main_db_name
         dict converters  # SQLite decltype -> converter(value).
         dict adapters  # Python type -> adapter(value).
-        dict functions  # name -> fn.
+        dict registrations  # (name, nargs, kind) -> (kind, fn, name, nargs...)
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # id(stmt) -> Statement.
         object blob_in_use  # id(blob) -> Blob.
@@ -909,7 +909,7 @@ cdef class Connection(_callable_context_manager):
         self.adapters = {}
 
         self.db = NULL
-        self.functions = {}
+        self.registrations = {}
         self.stmt_available = {}
         self.stmt_in_use = {}
         self.blob_in_use = weakref.WeakValueDictionary()
@@ -976,9 +976,6 @@ cdef class Connection(_callable_context_manager):
             sqlite3_progress_handler(self.db, 0, NULL, NULL)
             self._progress_hook = None
 
-        # Drop references to user-defined functions.
-        self.functions = {}
-
         # Close all blobs.
         for blob in list(self.blob_in_use.values()):
             blob.close()
@@ -990,6 +987,10 @@ cdef class Connection(_callable_context_manager):
 
         # Clear last error.
         self._callback_error = None
+
+        # UDFs, stored in `registrations`, are owned by SQLite so their
+        # xDestroy CB will free the refs. We retain the refs in order to replay
+        # them on re-connect.
 
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
@@ -1049,6 +1050,9 @@ cdef class Connection(_callable_context_manager):
         if self.pragmas:
             for key, value in self.pragmas.items():
                 self.pragma(key, value)
+
+        for (kind, fn, name, n, det) in list(self.registrations.values()):
+            self._register(kind, fn, name, n, det)
 
         return True
 
@@ -1500,124 +1504,93 @@ cdef class Connection(_callable_context_manager):
             sqlite3_free(errmsg)
             raise OperationalError(f'error loading extension: {msg}')
 
-    def create_function(self, fn, name=None, nargs=-1, deterministic=True):
+    cdef _register(self, kind, fn, name, nargs, deterministic):
+        # Register user-defined scalar/aggregate/window/collation, and hand
+        # ownership of the `_Callback` to SQLite.
         check_connection(self)
         cdef:
-            _Callback callback
-            bytes bname
+            _Callback callback = _Callback.__new__(_Callback, self, fn)
+            bytes bname = encode(name)
             int flags = SQLITE_UTF8
             int rc
-
-        name = name or fn.__name__
-        bname = encode(name)
-
-        # Store reference to user-defined function.
-        callback = _Callback.__new__(_Callback, self, fn)
-        self.functions[name] = callback
 
         if deterministic:
             flags |= SQLITE_DETERMINISTIC
 
-        rc = sqlite3_create_function(
-            self.db,
-            bname,
-            <int>nargs,
-            flags,
-            <void *>callback,
-            _function_cb,
-            NULL,
-            NULL)
+        Py_INCREF(callback)  # Matching decref in _free_cb.
+
+        if kind == 'function':
+            rc = sqlite3_create_function_v2(
+                self.db,
+                bname,
+                <int>nargs,
+                flags,
+                <void *>callback,
+                _function_cb,
+                NULL,
+                NULL,
+                _free_cb)
+        elif kind == 'aggregate':
+            rc = sqlite3_create_function_v2(
+                self.db,
+                bname,
+                <int>nargs,
+                flags,
+                <void *>callback,
+                NULL,
+                _step_cb,
+                _finalize_cb,
+                _free_cb)
+        elif kind == 'window':
+            rc = sqlite3_create_window_function(
+                self.db,
+                <const char *>bname,
+                <int>nargs,
+                flags,
+                <void *>callback,
+                _step_cb,
+                _finalize_cb,
+                _value_cb,
+                _inverse_cb,
+                _free_cb)
+        elif kind == 'collation':
+            rc = sqlite3_create_collation_v2(
+                self.db,
+                <const char *>bname,
+                SQLITE_UTF8,
+                <void *>callback,
+                _collation_cb,
+                _free_cb)
+        else:
+            Py_DECREF(callback)
+            raise ValueError('Unrecognized registration kind: %s' % kind)
+
         if rc != SQLITE_OK:
-            raise_sqlite_error(self, 'error creating function: ')
+            # SQLite invokes xDestroy so no need to DECREF here.
+            raise_sqlite_error(self, 'error creating %s: ' % kind)
+
+        self.registrations[(name, nargs, kind)] = (
+            kind,
+            fn,
+            name,
+            nargs,
+            deterministic)
+
+    def create_function(self, fn, name=None, nargs=-1, deterministic=True):
+        self._register('function', fn, name or fn.__name__, nargs,
+                       deterministic)
 
     def create_aggregate(self, agg, name=None, nargs=-1, deterministic=True):
-        check_connection(self)
-        cdef:
-            _Callback callback
-            bytes bname
-            int flags = SQLITE_UTF8
-            int rc
-
-        name = name or agg.__name__
-        bname = encode(name)
-
-        if deterministic:
-            flags |= SQLITE_DETERMINISTIC
-
-        # Store reference to user-defined function.
-        callback = _Callback.__new__(_Callback, self, agg)
-        self.functions[name] = callback
-
-        rc = sqlite3_create_function(
-            self.db,
-            bname,
-            <int>nargs,
-            flags,
-            <void *>callback,
-            NULL,
-            _step_cb,
-            _finalize_cb)
-
-        if rc != SQLITE_OK:
-            raise_sqlite_error(self, 'error creating aggregate: ')
+        self._register('aggregate', agg, name or agg.__name__, nargs,
+                       deterministic)
 
     def create_window_function(self, agg, name=None, nargs=-1,
                                deterministic=True):
-        check_connection(self)
-        cdef:
-            _Callback callback
-            bytes bname
-            int flags = SQLITE_UTF8
-            int rc
-
-        name = name or agg.__name__
-        bname = encode(name)
-
-        if deterministic:
-            flags |= SQLITE_DETERMINISTIC
-
-        # Store reference to user-defined function.
-        callback = _Callback.__new__(_Callback, self, agg)
-        self.functions[name] = callback
-
-        rc = sqlite3_create_window_function(
-            self.db,
-            <const char *>bname,
-            nargs,
-            flags,
-            <void *>callback,
-            _step_cb,
-            _finalize_cb,
-            _value_cb,
-            _inverse_cb,
-            NULL)
-
-        if rc != SQLITE_OK:
-            raise_sqlite_error(self, 'error creating aggregate: ')
+        self._register('window', agg, name or agg.__name__, nargs,
+                       deterministic)
 
     def create_collation(self, fn, name=None):
-        check_connection(self)
-        cdef:
-            _Callback callback
-            bytes bname
-            int rc
-
-        name = name or fn.__name__
-        bname = encode(name)
-
-        # Store reference to user-defined function.
-        callback = _Callback.__new__(_Callback, self, fn)
-        self.functions[name] = callback
-
-        rc = sqlite3_create_collation(
-            self.db,
-            <const char *>bname,
-            SQLITE_UTF8,
-            <void *>callback,
-            _collation_cb)
-
-        if rc != SQLITE_OK:
-            raise_sqlite_error(self, 'error creating collation: ')
+        self._register('collation', fn, name or fn.__name__, 0, True)
 
     def commit_hook(self, fn):
         check_connection(self)
@@ -1849,6 +1822,10 @@ cdef class _Callback(object):
         self.conn = conn
         self.fn = fn
         self.settings = settings
+
+cdef void _free_cb(void *p) noexcept with gil:
+    if p != NULL:
+        Py_DECREF(<_Callback>p)
 
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:

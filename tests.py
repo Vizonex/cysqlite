@@ -1963,6 +1963,14 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.assertRaises(OperationalError, lambda: run(1))
         self.assertRaises(OperationalError, lambda: run(1, 2, 3))
 
+    def test_create_function_overload_arity(self):
+        self.db.create_function(lambda a: a + 1, 'ov', 1)
+        self.db.create_function(lambda a, b: a + b, 'ov', 2)
+        self.db.create_function(lambda a, b, c: a + b + c, 'ov', 3)
+        self.assertEqual(self.db.execute_scalar('select ov(10)'), 11)
+        self.assertEqual(self.db.execute_scalar('select ov(1, 2)'), 3)
+        self.assertEqual(self.db.execute_scalar('select ov(1, 2, 3)'), 6)
+
     def test_create_function_return_types(self):
         def value_type(i):
             return VAL_TESTS[i]
@@ -1981,6 +1989,24 @@ class TestUserDefinedCallbacks(BaseTestCase):
         for i in range(len(VAL_CONVERSION_TESTS)):
             val = self.db.execute('select value_conv(?)', (i,)).scalar()
             self.assertEqual(val, VAL_CONVERSION_TESTS[i][1])
+
+    def test_registrations_survive_reconnect(self):
+        self.db.create_function(lambda a: a + a, 'dbl', 1)
+        self.db.create_function(lambda a, b: a + a + b + b, 'dbl', 2)
+        self.db.create_collation(lambda a, b: (a > b) - (a < b), 'col')
+        self.assertEqual(self.db.execute_scalar('select dbl(2)'), 4)
+        self.assertEqual(self.db.execute_scalar('select dbl(2, 3)'), 10)
+
+        self.db.close()
+        self.db.connect()
+
+        self.assertEqual(self.db.execute_scalar('select dbl(3)'), 6)
+        self.assertEqual(self.db.execute_scalar('select dbl(3, 4)'), 14)
+        self.db.execute('create table g(k)')
+        self.db.execute('insert into g(k) values (?), (?), (?)',
+                        ('b', 'a', 'c'))
+        curs = self.db.execute('select k from g order by k collate col')
+        self.assertEqual([k for k, in curs], ['a', 'b', 'c'])
 
     def test_create_aggregate(self):
         class Sum(object):
