@@ -4036,6 +4036,13 @@ class TestPool(unittest.TestCase):
             with self.assertRaises(OperationalError):
                 conn.execute('create table g(k)')
 
+    def test_reader_resets_tx(self):
+        with self.pool.reader() as conn:
+            conn.begin()
+            self.assertTrue(conn.in_transaction)
+        with self.pool.reader() as conn:
+            self.assertFalse(conn.in_transaction)
+
     def test_writer(self):
         with self.pool.writer() as conn:
             conn.execute('create table g(k)')

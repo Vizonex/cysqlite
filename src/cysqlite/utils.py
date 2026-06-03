@@ -105,8 +105,14 @@ class _Reader(_ConnectionContext):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.conn is not None:
-            self.pool._readers.put(self.conn)
-            self.conn = None
+            try:
+                # RO conn can still hold open a Tx, which pins the WAL.
+                # Rollback before releasing.
+                if self.conn.in_transaction:
+                    self.conn.rollback()
+            finally:
+                self.pool._readers.put(self.conn)
+                self.conn = None
 
 class _Writer(_ConnectionContext):
     def __enter__(self):

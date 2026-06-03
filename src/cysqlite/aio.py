@@ -286,8 +286,12 @@ class _AsyncReader(_ConnectionContext):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.conn is not None:
-            await self.pool._readers.put(self.conn)
-            self.conn = None
+            try:
+                if self.conn.in_transaction:
+                    await self.conn.rollback()
+            finally:
+                await self.pool._readers.put(self.conn)
+                self.conn = None
 
 class _AsyncWriter(_ConnectionContext):
     async def __aenter__(self):

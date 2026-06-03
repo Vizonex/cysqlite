@@ -2257,6 +2257,7 @@ cdef class Transaction(_callable_context_manager):
                     self.commit(False)
                 except Exception:
                     self.rollback(False)
+                    raise
         finally:
             self.conn._transaction_depth -= 1
 
