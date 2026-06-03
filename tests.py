@@ -1680,6 +1680,21 @@ class TestTransactions(BaseTestCase):
         self.assertRaises(ValueError, user_error)
         self.assertRegister([])
 
+    def test_atomic_commit_failure_raises(self):
+        self.db.pragma('foreign_keys', 1)
+        self.db.execute('create table p (id integer primary key)')
+        self.db.execute('create table c (id integer primary key, '
+                        'pid integer references p(id) '
+                        'deferrable initially deferred)')
+
+        def fails():
+            with self.db.atomic():
+                self.db.execute('insert into c (pid) values (1337)')
+
+        self.assertRaises(ForeignKeyIntegrityError, fails)
+        self.assertFalse(self.db.in_transaction)
+        self.assertEqual(self.db.execute_scalar('select count(*) from c'), 0)
+
     def test_closing_db_in_transaction(self):
         with self.db.atomic():
             self.assertRaises(OperationalError, self.db.close)
