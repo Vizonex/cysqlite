@@ -1254,6 +1254,9 @@ Connection
           inside indexes on expressions, CHECK constraints, generated columns,
           and partial-index ``WHERE`` clauses.
 
+      Functions are automatically re-registered if the connection is closed and
+      then re-opened.
+
       Example:
 
       .. code-block:: python
@@ -1296,6 +1299,9 @@ Connection
           across references within a single row, and the function can be used
           inside indexes on expressions, CHECK constraints, generated columns,
           and partial-index ``WHERE`` clauses.
+
+      Aggregates are automatically re-registered if the connection is closed and
+      then re-opened.
 
       Examples:
 
@@ -1358,6 +1364,9 @@ Connection
           inside indexes on expressions, CHECK constraints, generated columns,
           and partial-index ``WHERE`` clauses.
 
+      Window functions are automatically re-registered if the connection is
+      closed and then re-opened.
+
       .. code-block:: python
 
          class MySum(object):
@@ -1395,6 +1404,9 @@ Connection
       :type fn: callback | None
       :param str name: name of the SQL collation. If unspecified, the name of
           the Python function will be used.
+
+      Collations are automatically re-registered if the connection is closed and
+      then re-opened.
 
       The following example shows a reverse sorting collation:
 
@@ -2549,6 +2561,7 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
            ('key', 'TEXT'),
            ('value', 'TEXT')]
        params = []
+       with_rowid = True  # iterate() must return (rowid, (row tuple)).
 
        _data = {}
        _next_id = 1
@@ -2705,6 +2718,11 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
       *Optional* - specify the name for the table function. If not provided,
       name will be taken from the class name.
 
+   .. attribute:: with_rowid = False
+
+      *Optional* - specify rowid for each row returned. Rows returned by the
+      ``iterate()`` method must be of form ``(rowid, (row, data, ...))``.
+
    .. attribute:: print_tracebacks = True
 
       Print a full traceback for any errors that occur in the table-function's
@@ -2725,7 +2743,7 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
        :returns: A tuple of row data corresponding to the columns named
            in the :attr:`~TableFunction.columns` attribute.
 
-           Implementations may explicitly specify a ``rowid`` by returning a
+           When :attr:`TableFunction.with_rowid` is ``True``, must return a
            2-tuple of ``(rowid, (row, data, here))``.
        :raises StopIteration: To signal that no more rows are available.
 
