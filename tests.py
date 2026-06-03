@@ -1986,6 +1986,14 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.assertEqual(self.db.execute_scalar('select ov(1, 2)'), 3)
         self.assertEqual(self.db.execute_scalar('select ov(1, 2, 3)'), 6)
 
+    def test_i64_bounds(self):
+        self.db.create_function(lambda i: 2 ** 63 - i, 'big')
+        with self.assertRaises(OperationalError):
+            self.db.execute_scalar('select big()')
+
+        res = self.db.execute_scalar('select big(1)')
+        self.assertEqual(res, (2 ** 63) - 1)
+
     def test_create_function_return_types(self):
         def value_type(i):
             return VAL_TESTS[i]

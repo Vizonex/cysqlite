@@ -3475,6 +3475,9 @@ cdef python_to_sqlite(sqlite3_context *context, param):
     if param is None:
         sqlite3_result_null(context)
     elif isinstance(param, int):
+        if param > ((1 << 63) - 1) or param < -(1 << 63):
+            sqlite3_result_error(context, encode('integer out of range'), -1)
+            return SQLITE_ERROR
         sqlite3_result_int64(context, <sqlite3_int64>param)
     elif isinstance(param, float):
         sqlite3_result_double(context, <double>param)
