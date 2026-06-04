@@ -16,7 +16,7 @@ from decimal import Decimal
 from fractions import Fraction
 
 from cysqlite import *
-from cysqlite._cysqlite import Cursor
+from cysqlite._cysqlite import Cursor, HAS_LOAD_EXTENSION
 from cysqlite.metadata import Column, ForeignKey, Index
 
 
@@ -2569,6 +2569,8 @@ class TestDatabaseSettings(BaseTestCase):
             ('main', ''),
             ('addl', '/tmp/cysqlite.db')])
 
+    @unittest.skipUnless(HAS_LOAD_EXTENSION,
+                         'SQLite built without load-extension support')
     def test_load_extension_sql_disabled_default(self):
         with self.assertRaises(OperationalError) as cm:
             self.db.execute('select load_extension(\'/x/y\')')

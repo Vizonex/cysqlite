@@ -20,6 +20,43 @@ compile_args = ['-O3', '-Wall'] if sys.platform != 'win32' else ['/O2']
 if os.environ.get('DEBUG') and sys.platform != 'win32':
     compile_args = ['-O0', '-Wall']
 
+
+def _have_load_extension():
+    override = os.environ.get('CYSQLITE_LOAD_EXTENSION')
+    if override is not None:
+        return override.strip().lower() not in ('0', 'false', 'no', '')
+
+    import tempfile
+    import shutil
+    from setuptools._distutils.ccompiler import new_compiler
+    from setuptools._distutils.sysconfig import customize_compiler
+
+    tmp = tempfile.mkdtemp(prefix='cysqlite-probe-')
+    try:
+        probe = os.path.join(tmp, 'probe.c')
+        with open(probe, 'w') as fh:
+            fh.write('#include "sqlite3.h"\n'
+                     'int main(void){ return sqlite3_enable_load_extension == 0; }\n')
+        cc = new_compiler()
+        customize_compiler(cc)
+        saved = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        try:
+            cc.compile([probe], output_dir=tmp)
+            return True
+        except Exception:
+            return False
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            os.close(devnull)
+    except Exception:
+        # Fallback, assume we have it if we're not crapple.
+        return sys.platform != 'darwin'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 link_args = []
 
 # Determine how we are building cysqlite.
@@ -45,6 +82,7 @@ if sqlite_source:
         ('SQLITE_ENABLE_FTS5', 1),
         ('SQLITE_ENABLE_JSON1', 1),
         ('SQLITE_ENABLE_LOAD_EXTENSION', 1),
+        ('CYSQLITE_HAVE_LOAD_EXTENSION', 1),
         ('SQLITE_ENABLE_MATH_FUNCTIONS', 1),
         ('SQLITE_ENABLE_RTREE', 1),
         ('SQLITE_ENABLE_STAT4', 1),
@@ -86,7 +124,9 @@ if sqlite_source:
 else:
     include_dirs = []
     libraries = ['sqlite3']
-    define_macros = []
+    define_macros = [
+        ('CYSQLITE_HAVE_LOAD_EXTENSION', 1 if _have_load_extension() else 0),
+    ]
 
 cysqlite_extension = Extension(
     'cysqlite._cysqlite',

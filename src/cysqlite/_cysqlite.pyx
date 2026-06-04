@@ -61,6 +61,7 @@ from cysqlite.exceptions import (
     IntegrityError,
     InternalError,
     NotNullIntegrityError,
+    NotSupportedError,
     OperationalError,
     PrimaryKeyIntegrityError,
     ProgrammingError,
@@ -1032,11 +1033,7 @@ cdef class Connection(_callable_context_manager):
             self.db = NULL
             raise OperationalError(f'error opening database: {errmsg}.')
 
-        if self.extensions:
-            # Only enable C-API sqlite3_load_extension() and the connection
-            # load_extension() method - do not enable the sql-callable
-            # load_extension() function. If you want this, call
-            # enable_load_extension(True).
+        if self.extensions and HAS_LOAD_EXTENSION:
             rc = sqlite3_db_config(
                 self.db,
                 SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
@@ -1502,12 +1499,16 @@ cdef class Connection(_callable_context_manager):
 
     def load_extension(self, name):
         check_connection(self)
+        if not HAS_LOAD_EXTENSION:
+            raise NotSupportedError(
+                'this build of SQLite does not support loadable extensions '
+                '(compiled with SQLITE_OMIT_LOAD_EXTENSION)')
         cdef:
             bytes bname = encode(name)
             char *errmsg
             int rc
 
-        rc = sqlite3_load_extension(self.db, bname, NULL, &errmsg)
+        rc = cysqlite_load_extension(self.db, bname, NULL, &errmsg)
         if rc != SQLITE_OK:
             msg = decode(errmsg)
             sqlite3_free(errmsg)
@@ -1690,7 +1691,11 @@ cdef class Connection(_callable_context_manager):
 
     def enable_load_extension(self, enabled=True):
         check_connection(self)
-        cdef int rc = sqlite3_enable_load_extension(self.db, enabled)
+        if not HAS_LOAD_EXTENSION:
+            raise NotSupportedError(
+                'this build of SQLite does not support loadable extensions '
+                '(compiled with SQLITE_OMIT_LOAD_EXTENSION)')
+        cdef int rc = cysqlite_enable_load_extension(self.db, enabled)
         if rc != SQLITE_OK:
             raise_sqlite_error(self, 'error calling enable_load_extension: ')
         return enabled
@@ -1752,8 +1757,14 @@ cdef class Connection(_callable_context_manager):
     def get_triggers_enabled(self):
         return self.db_config(SQLITE_DBCONFIG_ENABLE_TRIGGER)
     def set_load_extension(self, int enabled):
+        if not HAS_LOAD_EXTENSION:
+            raise NotSupportedError(
+                'this build of SQLite does not support loadable extensions')
         return self.db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, enabled)
     def get_load_extension(self):
+        if not HAS_LOAD_EXTENSION:
+            raise NotSupportedError(
+                'this build of SQLite does not support loadable extensions')
         return self.db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION)
     def set_shared_cache(self, int enabled):
         check_connection(self)
@@ -3488,6 +3499,7 @@ def compile_option(opt):
 
 
 HAS_COLUMN_METADATA = compile_option('enable_column_metadata')
+HAS_LOAD_EXTENSION = bool(CYSQLITE_HAVE_LOAD_EXTENSION)
 #HAS_PREUPDATE_HOOK = compile_option('enable_preupdate_hook')
 #HAS_STMT_SCANSTATUS = compile_option('enable_stmt_scanstatus')
 

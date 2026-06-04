@@ -575,8 +575,6 @@ cdef extern from "sqlite3.h" nogil:
     cdef int sqlite3_db_release_memory(sqlite3*)
     cdef sqlite3_int64 sqlite3_soft_heap_limit64(sqlite3_int64 N)
     cdef int sqlite3_table_column_metadata(sqlite3 *db, const char *zDbName, const char *zTableName, const char *zColumnName, char **pzDataType, char **pzCollSeq, int *pNotNull, int *pPrimaryKey, int *pAutoinc)
-    cdef int sqlite3_load_extension(sqlite3 *db, const char *zFile, const char *zProc, char **pzErrMsg)
-    cdef int sqlite3_enable_load_extension(sqlite3 *db, int onoff)
     cdef int sqlite3_auto_extension(void(*xEntryPoint)())
     cdef int sqlite3_cancel_auto_extension(void(*xEntryPoint)())
     cdef void sqlite3_reset_auto_extension()
@@ -664,3 +662,44 @@ cdef extern from "sqlite3.h" nogil:
 
 
 cdef int SQLITE_JSON_TYPE = 74  # ASCII 'J', from sqlite/ext/misc/json.c.
+
+
+# Loadable-extension shim. Some system libsqlite3 are built without extension
+# support. setup.py probes for this and defines CYSQLITE_HAVE_LOAD_EXTENSION
+# accordingly (defaulting to 1 here for amalgamation builds). When the feature
+# is absent we route through these forwarders so the generated C never
+# references missing symbols.
+cdef extern from *:
+    """
+    #include "sqlite3.h"
+
+    #ifndef CYSQLITE_HAVE_LOAD_EXTENSION
+    #define CYSQLITE_HAVE_LOAD_EXTENSION 1
+    #endif
+
+    static int cysqlite_load_extension(sqlite3 *db, const char *zFile,
+                                       const char *zProc, char **pzErrMsg) {
+    #if CYSQLITE_HAVE_LOAD_EXTENSION
+        return sqlite3_load_extension(db, zFile, zProc, pzErrMsg);
+    #else
+        (void)db; (void)zFile; (void)zProc;
+        if (pzErrMsg) {
+            *pzErrMsg = sqlite3_mprintf(
+                "extension loading not supported (SQLITE_OMIT_LOAD_EXTENSION)");
+        }
+        return SQLITE_ERROR;
+    #endif
+    }
+
+    static int cysqlite_enable_load_extension(sqlite3 *db, int onoff) {
+    #if CYSQLITE_HAVE_LOAD_EXTENSION
+        return sqlite3_enable_load_extension(db, onoff);
+    #else
+        (void)db; (void)onoff;
+        return SQLITE_ERROR;
+    #endif
+    }
+    """
+    int CYSQLITE_HAVE_LOAD_EXTENSION
+    int cysqlite_load_extension(sqlite3 *db, const char *zFile, const char *zProc, char **pzErrMsg)
+    int cysqlite_enable_load_extension(sqlite3 *db, int onoff)
