@@ -649,7 +649,9 @@ cdef class Cursor(object):
                 self.row_converters = self.stmt.get_row_converters(
                     self.conn.converters)
         elif self.step_status == SQLITE_DONE:
-            if not self.stmt.is_dml:
+            # DML with a RETURNING clause has columns even when it produced
+            # no rows -- expose the description either way.
+            if not self.stmt.is_dml or sqlite3_column_count(self.stmt.st) > 0:
                 self.set_description()
         else:
             self.abort()
@@ -953,10 +955,13 @@ cdef class Connection(_callable_context_manager):
         if self.db == NULL:
             return False
 
-        if self._transaction_depth > 0:
+        # Consult the actual connection state, not just the depth counter, so
+        # transactions opened manually via begin() are covered as well.
+        if self._transaction_depth > 0 or not sqlite3_get_autocommit(self.db):
             if force:
                 try:
-                    self.rollback()
+                    if not sqlite3_get_autocommit(self.db):
+                        self.rollback()
                 finally:
                     self._transaction_depth = 0
             else:
@@ -2035,15 +2040,13 @@ cdef int _collation_cb(void *data, int n1, const void *data1,
 
 cdef int _commit_cb(void *data) noexcept with gil:
     # C-callback that delegates to the Python commit handler. If the Python
-    # function raises a ValueError, then the commit is aborted and the
-    # transaction rolled back. Otherwise, regardless of the function return
-    # value, the transaction will commit.
+    # function returns a truthy value or raises an exception, the COMMIT is
+    # converted into a ROLLBACK (matching the stdlib sqlite3 behavior).
     cdef _Callback cb = <_Callback>data
 
     try:
-        cb.fn()
-    except ValueError:
-        return SQLITE_ERROR
+        if cb.fn():
+            return SQLITE_ERROR
     except Exception as exc:
         cb.conn._callback_error = exc
         if cb.conn.print_callback_tracebacks:
@@ -2338,7 +2341,9 @@ cdef class Atomic(_callable_context_manager):
         self.lock = lock
 
     def __enter__(self):
-        if self.conn._transaction_depth == 0:
+        # Use a savepoint when any transaction is already open -- including
+        # one started manually via begin() -- otherwise BEGIN would fail.
+        if self.conn._transaction_depth == 0 and not self.conn.in_transaction:
             self.txn = self.conn.transaction(self.lock)
         else:
             self.txn = self.conn.savepoint()
@@ -2528,18 +2533,21 @@ cdef class Blob(object):
             bytes pybuf
             int length
             int blob_size = sqlite3_blob_bytes(self.blob)
+            int remaining = blob_size - self.offset
             char *buf
 
-        if size is None or size < 0:
-            length = blob_size - self.offset
+        if remaining <= 0:
+            return b''
+
+        # Clamp to the remaining bytes (also avoids overflowing the C int
+        # when a very large size is requested).
+        if size is None or size < 0 or size > remaining:
+            length = remaining
         else:
             length = size
 
-        if length == 0 or self.offset >= blob_size:
+        if length == 0:
             return b''
-
-        if self.offset + length > blob_size:
-            length = blob_size - self.offset
 
         pybuf = PyBytes_FromStringAndSize(NULL, length)
         buf = PyBytes_AS_STRING(pybuf)

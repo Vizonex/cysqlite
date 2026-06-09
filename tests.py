@@ -1179,6 +1179,18 @@ class TestReturningRowcount(BaseTestCase):
     # Invariant: after a DML+RETURNING cursor is drained, rowcount equals
     # the total affected-row count. The pre-drain value is implementation-
     # defined and intentionally not asserted on.
+    def test_returning_description_zero_rows(self):
+        # DML+RETURNING exposes a description even when no rows came back.
+        self.db.execute('create table k (id integer primary key, v)')
+        curs = self.db.execute('delete from k where v > 100 '
+                               'returning id, v')
+        self.assertEqual(curs.description, (('id',), ('v',)))
+        self.assertEqual(curs.fetchall(), [])
+
+        # Plain DML still reports no description.
+        curs = self.db.execute('insert into k (v) values (1)')
+        self.assertIsNone(curs.description)
+
     def test_insert_returning_final_after_drain(self):
         self.db.execute('create table k (v)')
         curs = self.db.execute(
@@ -1564,6 +1576,54 @@ class TestTransactions(BaseTestCase):
     def _save(self, *vals):
         self.db.executemany('insert into reg (val) values (?)',
                             [(v,) for v in vals])
+
+    def test_atomic_after_manual_begin(self):
+        # atomic() inside a manually-started transaction uses a savepoint
+        # rather than failing with "cannot start a transaction within a
+        # transaction".
+        self.db.begin()
+        with self.db.atomic():
+            self._save(1)
+        self.assertFalse(self.db.autocommit())  # Outer txn still open.
+        self.db.rollback()
+        self.assertRegister([])
+
+        self.db.begin()
+        with self.db.atomic():
+            self._save(2)
+        self.db.commit()
+        self.assertRegister([2])
+
+        # A failing atomic() block only rolls back the savepoint.
+        self.db.begin()
+        self._save(3)
+        with self.assertRaises(ValueError):
+            with self.db.atomic():
+                self._save(4)
+                raise ValueError('oops')
+        self.db.commit()
+        self.assertRegister([2, 3])
+
+    def test_close_manual_transaction(self):
+        # close() refuses while a manually-started transaction is open, and
+        # force-close rolls the manual transaction back.
+        filename = '/tmp/cysqlite-manual-txn.db'
+        db = Connection(filename)
+        try:
+            db.execute('create table reg (val integer not null)')
+            db.begin()
+            db.execute('insert into reg (val) values (1)')
+            self.assertRaises(OperationalError, db.close)
+            self.assertFalse(db.is_closed())
+
+            self.assertTrue(db.close(force=True))
+            db.connect()
+            vals = [v for v, in db.execute('select val from reg')]
+            self.assertEqual(vals, [])
+        finally:
+            db.close(force=True)
+            if os.path.exists(filename):
+                os.unlink(filename)
 
     def test_simple(self):
         self.assertFalse(self.db.in_transaction)
@@ -2308,6 +2368,32 @@ class TestUserDefinedCallbacks(BaseTestCase):
         self.assertCount(0)
 
         self.assertTrue(self.db.autocommit())
+        self.db.commit_hook(None)
+
+    def test_commit_hook_return_value(self):
+        # A truthy return value converts the COMMIT into a ROLLBACK,
+        # matching the stdlib sqlite3 commit-hook contract.
+        state = {'abort': True, 'calls': 0}
+        def on_commit():
+            state['calls'] += 1
+            return state['abort']
+
+        self.db.commit_hook(on_commit)
+        self.db.begin()
+        self.db.execute('delete from kv')
+        self.assertCount(0)
+        with self.assertRaises(IntegrityError):
+            self.db.commit()
+        self.assertTrue(self.db.autocommit())
+        self.assertCount(3)
+
+        # Falsy return: commit proceeds.
+        state['abort'] = False
+        self.db.begin()
+        self.db.execute('delete from kv')
+        self.db.commit()
+        self.assertCount(0)
+        self.assertEqual(state['calls'], 2)
         self.db.commit_hook(None)
 
     def test_broken_commit_hook(self):
@@ -3150,6 +3236,20 @@ class TestBlob(BaseTestCase):
         blob.seek(4)
         self.assertEqual(blob.readall(), b'efg\x00')
 
+        blob.close()
+
+    def test_blob_read_clamps_size(self):
+        # Oversized read requests are clamped to the remaining bytes, like
+        # other file-like objects (no OverflowError for size > INT_MAX).
+        rowid = self.create_blob_row(8)
+        blob = Blob(self.db, 'register', 'data', rowid)
+        blob.write(b'abcdefgh')
+        blob.seek(0)
+        self.assertEqual(blob.read(2 ** 40), b'abcdefgh')
+        self.assertEqual(blob.read(2 ** 40), b'')
+        blob.seek(6)
+        self.assertEqual(blob.read(100), b'gh')
+        self.assertEqual(blob.read(0), b'')
         blob.close()
 
     def test_blob_iobase_methods(self):

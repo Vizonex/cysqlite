@@ -1425,11 +1425,13 @@ Connection
    .. method:: commit_hook(fn)
 
       Register a callback to be executed whenever a transaction is committed
-      on the current connection. The callback accepts no parameters and the
-      return value is ignored.
+      on the current connection. The callback accepts no parameters.
 
-      However, if the callback raises a :class:`ValueError`, the transaction
-      will be aborted and rolled-back.
+      If the callback returns a truthy value or raises an exception, the
+      ``COMMIT`` is converted into a ``ROLLBACK`` (this matches the behavior
+      of the stdlib ``sqlite3`` commit hook). When the callback raises, the
+      exception is additionally chained as ``__cause__`` on the error raised
+      by the failed commit.
 
       :param fn: callable or ``None`` to clear the current hook.
       :type fn: callable | None
@@ -1442,8 +1444,7 @@ Connection
 
           # Example that aborts all COMMITs between midnight and 12:59:59am.
           def on_commit():
-              if datetime.now().hour == 0:
-                  raise ValueError('No changes allowed this late.')
+              return datetime.now().hour == 0
 
           db.commit_hook(on_commit)
 

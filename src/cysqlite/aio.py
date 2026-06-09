@@ -166,9 +166,6 @@ class AsyncCursor:
     def rowcount(self):
         return self._cursor.rowcount
 
-    def __aiter__(self):
-        return self
-
     async def fetchmany(self, size=100, constructor=None):
         def _fetch():
             res = self._cursor.fetchmany(size)

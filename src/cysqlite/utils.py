@@ -6,7 +6,6 @@ from cysqlite._cysqlite import connect
 from cysqlite._constants import SQLITE_OPEN_CREATE
 from cysqlite._constants import SQLITE_OPEN_READONLY
 from cysqlite._constants import SQLITE_OPEN_READWRITE
-from cysqlite._constants import SQLITE_OPEN_WAL
 from cysqlite._constants import SQLITE_TRACE_PROFILE
 from cysqlite.exceptions import InterfaceError
 
@@ -59,7 +58,7 @@ class Pool(object):
 
     def _connect(self, read_only=False):
         if read_only:
-            flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_WAL
+            flags = SQLITE_OPEN_READONLY
         else:
             flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
 
