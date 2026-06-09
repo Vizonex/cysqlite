@@ -133,6 +133,12 @@ class TestModule(BaseTestCase):
         result = compile_option('this_option_does_not_exist')
         self.assertEqual(result, 0)
 
+    def test_vfs_list(self):
+        import cysqlite
+        vfs_names = cysqlite.vfs_list()
+        self.assertTrue(isinstance(vfs_names, list))
+        self.assertTrue(len(vfs_names) >= 1)
+
 
 class TestConnection(BaseTestCase):
     def assertDB(self, filename, expected):
@@ -713,6 +719,20 @@ class TestExecute(BaseTestCase):
         curs = self.db.executemany('insert into kv(key, value, extra) '
                                    'values (?, ?, ?)', None)
         self.assertCount(0)
+
+    def test_executemany_empty_generator(self):
+        self.create_table()
+        self.create_rows(('k1', 'v1', 1))
+
+        # An empty generator must not report a stale lastrowid.
+        sql = 'insert into kv(key, value, extra) values (?, ?, ?)'
+        curs = self.db.executemany(sql, (r for r in []))
+        self.assertIsNone(curs.lastrowid)
+        self.assertEqual(curs.rowcount, 0)
+
+        curs = self.db.executemany(sql, (r for r in [('k2', 'v2', 2)]))
+        self.assertEqual(curs.lastrowid, 2)
+        self.assertEqual(curs.rowcount, 1)
 
     def test_executemany_bind_error(self):
         self.create_table()
@@ -1719,6 +1739,29 @@ class TestTransactions(BaseTestCase):
             self.test_commit_rollback()
         self.assertRegister([1, 4])
 
+    def test_atomic_obj_commit_rollback(self):
+        # The Atomic object itself exposes commit/rollback, delegating to
+        # the wrapped transaction or savepoint.
+        a = self.db.atomic()
+        with a:
+            self._save(1)
+            a.commit()
+            self._save(2)
+            a.rollback()
+            self._save(3)
+
+        self.assertRegister([1, 3])
+
+        with self.db.atomic():
+            self._save(4)
+            a2 = self.db.atomic()
+            with a2:
+                self._save(5)
+                a2.rollback()
+                self._save(6)
+
+        self.assertRegister([1, 3, 4, 6])
+
     def test_nesting_transaction_obj(self):
         self.assertRegister([])
 
@@ -2179,6 +2222,47 @@ class TestUserDefinedCallbacks(BaseTestCase):
         curs = self.db.execute('select k from g order by k collate col')
         self.assertEqual([k for k, in curs], ['a', 'b', 'c'])
 
+    def test_remove_registrations(self):
+        class Sum(object):
+            def __init__(self): self.total = 0
+            def step(self, value): self.total += (value or 0)
+            def inverse(self, value): self.total -= (value or 0)
+            def value(self): return self.total
+            def finalize(self): return self.total
+
+        self.db.create_function(lambda a: a + a, 'dbl', 1)
+        self.db.create_aggregate(Sum, 'mysum', 1)
+        self.db.create_window_function(Sum, 'mywin', 1)
+        self.db.create_collation(lambda a, b: (a > b) - (a < b), 'col')
+        self.assertEqual(self.db.execute_scalar('select dbl(2)'), 4)
+
+        # Removing requires a name. nargs must match the registration.
+        self.assertRaises(ValueError, self.db.create_function, None)
+        self.assertRaises(ValueError, self.db.create_aggregate, None)
+        self.assertRaises(ValueError, self.db.create_window_function, None)
+        self.assertRaises(ValueError, self.db.create_collation, None)
+
+        self.db.create_function(None, 'dbl', 1)
+        self.db.create_aggregate(None, 'mysum', 1)
+        self.db.create_window_function(None, 'mywin', 1)
+        self.db.create_collation(None, 'col')
+
+        self.assertRaises(OperationalError, self.db.execute, 'select dbl(2)')
+        self.assertRaises(OperationalError, self.db.execute,
+                          'select mysum(1)')
+        self.assertRaises(OperationalError, self.db.execute,
+                          'select mywin(1) over ()')
+        self.assertRaises(OperationalError, self.db.execute,
+                          'select 1 order by 1 collate col')
+
+        # Removal is durable across a reconnect.
+        self.db.close()
+        self.db.connect()
+        self.assertRaises(OperationalError, self.db.execute, 'select dbl(2)')
+
+        # Removing a nonexistent function is a no-op.
+        self.db.create_function(None, 'nothere', 1)
+
     def test_create_aggregate(self):
         class Sum(object):
             def __init__(self): self.value = 0
@@ -2614,6 +2698,30 @@ class TestUserDefinedCallbacks(BaseTestCase):
 
         self.assertCallbackError('progress fail', ValueError)
 
+    def test_progress_interrupt(self):
+        # Any truthy return value interrupts the query.
+        self.db.progress(lambda: 'stop', 10)
+        with self.assertRaises(OperationalError):
+            self.db.execute('select * from kv order by key').fetchall()
+
+        self.db.progress(None)
+        self.assertCount(3)
+
+    def test_interrupt(self):
+        def interrupt():
+            self.db.interrupt()
+
+        self.db.progress(interrupt, 10)
+        with self.assertRaises(OperationalError):
+            self.db.execute(
+                'with recursive c(x) as (select 1 union all '
+                'select x + 1 from c where x < 1000000) '
+                'select count(*) from c').fetchall()
+
+        # Connection remains usable afterwards.
+        self.db.progress(None)
+        self.assertCount(3)
+
     def test_exec_cb(self):
         accum = []
         def cb(row):
@@ -2641,10 +2749,16 @@ class TestUserDefinedCallbacks(BaseTestCase):
             raise ValueError('broken cb')
 
         for i in range(10):
-            with self.assertRaises(OperationalError):
+            with self.assertRaises(OperationalError) as ctx:
                 self.db.execute_simple('select * from kv', broken)
+            self.assertCausedBy(ctx.exception, 'broken cb', ValueError)
 
-        self.assertCallbackError('broken cb', ValueError)
+    def test_exec_error_mapping(self):
+        # Errors are mapped to the appropriate exception subclass.
+        self.db.execute('create table u (k text unique)')
+        self.db.execute_simple("insert into u (k) values ('k1')")
+        with self.assertRaises(IntegrityError):
+            self.db.execute_simple("insert into u (k) values ('k1')")
 
 
 class TestDatabaseSettings(BaseTestCase):
@@ -2692,6 +2806,22 @@ class TestDatabaseSettings(BaseTestCase):
             self.db.pragma('cache_size', -4321, database='aux1',
                            permanent=True)
         self.db.detach('aux1')
+
+    def test_pragma_permanent_requires_value(self):
+        with self.assertRaises(ValueError):
+            self.db.pragma('cache_size', permanent=True)
+
+    def test_metadata_quoted_identifiers(self):
+        self.db.execute('create table "we""ird" ("a" integer primary key, '
+                        '"b ""x""" text)')
+        self.db.execute('create index "id""x" on "we""ird" ("b ""x""")')
+
+        self.assertEqual([c.name for c in self.db.get_columns('we"ird')],
+                         ['a', 'b "x"'])
+        self.assertEqual(self.db.get_primary_keys('we"ird'), ['a'])
+        indexes = self.db.get_indexes('we"ird')
+        self.assertEqual([i.name for i in indexes], ['id"x'])
+        self.assertEqual(indexes[0].columns, ['b "x"'])
 
     def test_pragmas_settings(self):
         self.db.execute('pragma foreign_keys = 1')
@@ -2859,6 +2989,31 @@ class TestBackup(BaseTestCase):
             self.assertEqual(dest.execute('select count(*) from g').scalar(),
                              100)
 
+    def test_backup_schema_names(self):
+        # name refers to the source database, dest_name to the destination.
+        self.db.attach(':memory:', 'aux1')
+        self.db.execute('create table aux1.a (k)')
+        self.db.execute("insert into aux1.a (k) values ('x'), ('y')")
+
+        with Connection(':memory:') as dest:
+            self.db.backup(dest, name='aux1')
+            self.assertEqual(dest.execute('select count(*) from a').scalar(),
+                             2)
+
+        # src_name is accepted as a deprecated alias for name.
+        with Connection(':memory:') as dest:
+            self.db.backup(dest, src_name='aux1')
+            self.assertEqual(dest.execute('select count(*) from a').scalar(),
+                             2)
+
+        # Backup main into an attached database on the destination.
+        with Connection(':memory:') as dest:
+            dest.attach(':memory:', 'aux2')
+            self.db.backup(dest, dest_name='aux2')
+            self.assertEqual(
+                dest.execute('select count(*) from aux2.g').scalar(), 100)
+            self.assertEqual(dest.get_tables(), [])
+
     def test_backup_progress(self):
         accum = []
 
@@ -2904,6 +3059,10 @@ class TestBackup(BaseTestCase):
             data2 = conn.serialize()
 
         self.assertEqual(data, data2)
+
+    def test_deserialize_empty(self):
+        with Connection(':memory:') as conn:
+            self.assertRaises(ValueError, conn.deserialize, b'')
 
     def test_deserialize_in_transaction(self):
         conn = Connection(':memory:')
@@ -3755,6 +3914,17 @@ class TestTableFunction(BaseTestCase):
         self.assertEqual([row for row, in curs],
                          ['and', 'hello', 'huey'])
 
+    def test_table_function_survives_reconnect(self):
+        Series.register(self.db)
+        curs = self.execute('select * from series(0, 2)')
+        self.assertEqual(list(curs), [(0,), (1,), (2,)])
+
+        self.db.close()
+        self.db.connect()
+
+        curs = self.execute('select * from series(0, 2)')
+        self.assertEqual(list(curs), [(0,), (1,), (2,)])
+
     def test_split_tbl(self):
         Split.register(self.db)
         self.execute('create table post (content TEXT);')
@@ -4008,6 +4178,8 @@ class TestTableFunction(BaseTestCase):
         import gc
         import weakref
 
+        db = connect(':memory:')
+
         # Create the class dynamically so we control all references to it.
         MyFunc = type('MyFunc', (TableFunction,), {
             'columns': [('val', 'TEXT')],
@@ -4018,7 +4190,7 @@ class TestTableFunction(BaseTestCase):
                        if idx > 0 else (self._v,),
         })
 
-        MyFunc.register(self.db)
+        MyFunc.register(db)
         ref = weakref.ref(MyFunc)
 
         # Drop reference to the class.
@@ -4028,9 +4200,11 @@ class TestTableFunction(BaseTestCase):
         # Class must still be alive as the module is in use.
         self.assertIsNotNone(ref())
 
-        # Close the connection. xDestroy fires and DECREFs the
-        # _TableFunctionImpl, releasing the class.
-        self.db.close()
+        # Closing fires xDestroy, which DECREFs the _TableFunctionImpl. The
+        # class is still retained by db.registrations for replay on
+        # reconnect, so the connection itself must go away too.
+        db.close()
+        del db
         gc.collect()
 
         # Reference should be dead since the module is no longer alive.
@@ -4410,6 +4584,16 @@ class TestMedianUDF(BaseTestCase):
             ('k3', 2, 4),   ('k3', 8, 4),   ('k3', 1, 4),
             ('k4', 1, 10),  ('k4', 10000, 10), ('k4', 10, 10)])
 
+    def test_median_window_null(self):
+        # NULLs are ignored by step() and inverse() alike. The moving frame
+        # exercises inverse() as NULL rows leave the window.
+        self.db.execute('insert into g(x, k) values (1, 1), (2, NULL), '
+                        '(3, 3), (4, 4)')
+        curs = self.db.execute(
+            'select median(k) over (order by id rows between 1 preceding '
+            'and current row) from g')
+        self.assertEqual(list(curs), [(1,), (1,), (3,), (3.5,)])
+
 
 #
 # Utils.
@@ -4440,6 +4624,19 @@ class TestPool(unittest.TestCase):
                 self.assertEqual(conn.database, self.filename)
                 self.assertEqual(conn.pragma('cache_size'), -4000)
                 self.assertEqual(conn.pragma('journal_mode'), 'wal')
+
+    def test_pool_does_not_mutate_pragmas(self):
+        pragmas = {'cache_size': -8000}
+        pool = Pool(self.filename, readers=1, pragmas=pragmas)
+        try:
+            with pool.reader() as conn:
+                self.assertEqual(conn.pragma('cache_size'), -8000)
+                self.assertEqual(conn.pragma('journal_mode'), 'wal')
+        finally:
+            pool.close()
+
+        # The caller's dict is left untouched by the default pragmas.
+        self.assertEqual(pragmas, {'cache_size': -8000})
 
     def test_reader_read_only(self):
         with self.pool.reader() as conn:
@@ -4568,9 +4765,21 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
 
     async def test_double_close(self):
         db = aconnect(':memory:')
-        await db.close()
+        self.assertTrue(await db.close())
         await asyncio.wait_for(db.close(), timeout=1.0)
         self.assertFalse(await db.close())
+
+    async def test_close_open_transaction(self):
+        # A failed close leaves the worker alive so the caller can recover.
+        db = aconnect(':memory:')
+        await db.begin()
+        with self.assertRaises(OperationalError):
+            await db.close()
+
+        self.assertTrue(db._thread.is_alive())
+        await db.rollback()
+        self.assertTrue(await asyncio.wait_for(db.close(), timeout=2.0))
+        self.assertFalse(db._thread.is_alive())
 
     async def test_execute(self):
         curs = await self.db.execute('select 1')

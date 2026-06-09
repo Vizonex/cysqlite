@@ -37,11 +37,13 @@ class Pool(object):
         self._connect_kwargs = connect_kwargs
         self._closed = False
 
-        # Apply overrides.
+        # Apply overrides. Copy the pragmas so the caller's dict is not
+        # mutated.
         connect_kwargs.setdefault('timeout', 2.0)
-        pragmas = connect_kwargs.setdefault('pragmas', {})
+        pragmas = dict(connect_kwargs.get('pragmas') or {})
         for key, value in self.default_pragmas.items():
             pragmas.setdefault(key, value)
+        connect_kwargs['pragmas'] = pragmas
 
         self.initialize_pool(readers, writer)
 

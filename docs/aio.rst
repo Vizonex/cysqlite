@@ -476,16 +476,16 @@ AsyncCursor
       :return: list of rows.
       :rtype: list
 
-   .. method:: fetchmany(size=100, constructor=list)
+   .. method:: fetchmany(size=100, constructor=None)
       :async:
 
       Fetch up to *size* rows from the result set. Returns fewer than *size*
       rows if the result set is exhausted.
 
       :param int size: maximum number of rows to return.
-      :param constructor: callable used to build the result container,
-         defaults to ``list``.
-      :return: container of rows.
+      :param constructor: optional callable applied to the list of rows to
+         build the result container.
+      :return: list of rows, or container of rows if *constructor* given.
 
    .. method:: scalar()
       :async:

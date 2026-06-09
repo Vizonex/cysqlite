@@ -25,8 +25,19 @@ class AsyncConnection(object):
     def __del__(self):
         thread = getattr(self, '_thread', None)
         if thread is not None and thread.is_alive():
-            self.queue.put((self.conn.close, None))
+            self.queue.put((partial(self.conn.close, True), None))
             self.queue.put(SHUTDOWN)
+
+    @staticmethod
+    def _resolve(fut, exc, result):
+        # Runs on the loop thread. The future may have been cancelled while
+        # the worker was busy, in which case there is nothing to deliver.
+        if fut.done():
+            return
+        if exc is not None:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(result)
 
     def _run(self):
         while True:
@@ -38,10 +49,12 @@ class AsyncConnection(object):
                 result = fn()
             except BaseException as exc:
                 if fut is not None:
-                    self.loop.call_soon_threadsafe(fut.set_exception, exc)
+                    self.loop.call_soon_threadsafe(self._resolve, fut, exc,
+                                                   None)
             else:
                 if fut is not None:
-                    self.loop.call_soon_threadsafe(fut.set_result, result)
+                    self.loop.call_soon_threadsafe(self._resolve, fut, None,
+                                                   result)
 
     def _submit(self, fn, *args, **kwargs):
         fut = self.loop.create_future()
@@ -51,34 +64,33 @@ class AsyncConnection(object):
         self.queue.put((wrap, fut))
         return fut
 
-    async def execute(self, sql, params=None):
-        fut = self.loop.create_future()
-        def wrap():
-            if not fut.cancelled():
-                return self.conn.execute(sql, params)
-
-        self.queue.put((wrap, fut))
+    async def _submit_query(self, fn, *args, **kwargs):
+        # Like _submit, but interrupt the running query if cancelled.
         try:
-            cursor = await fut
+            return await self._submit(fn, *args, **kwargs)
         except asyncio.CancelledError:
-            self.conn.interrupt()
+            if not self.conn.is_closed():
+                self.conn.interrupt()
             raise
 
+    async def execute(self, sql, params=None):
+        cursor = await self._submit_query(self.conn.execute, sql, params)
         return AsyncCursor(self, cursor)
 
     async def executemany(self, sql, seq_of_params):
-        cursor = await self._submit(self.conn.executemany, sql, seq_of_params)
+        cursor = await self._submit_query(self.conn.executemany, sql,
+                                          seq_of_params)
         return AsyncCursor(self, cursor)
 
     async def executescript(self, sql):
-        cursor = await self._submit(self.conn.executescript, sql)
+        cursor = await self._submit_query(self.conn.executescript, sql)
         return AsyncCursor(self, cursor)
 
     async def execute_one(self, sql, params=None):
-        return await self._submit(self.conn.execute_one, sql, params)
+        return await self._submit_query(self.conn.execute_one, sql, params)
 
     async def execute_scalar(self, sql, params=None):
-        return await self._submit(self.conn.execute_scalar, sql, params)
+        return await self._submit_query(self.conn.execute_scalar, sql, params)
 
     async def begin(self, lock=None):
         await self._submit(self.conn.begin, lock=lock)
@@ -93,13 +105,14 @@ class AsyncConnection(object):
         if not self._thread.is_alive():
             return False
 
-        try:
-            await self._submit(self.conn.close)
-        finally:
-            self.queue.put(SHUTDOWN)
-            await self.loop.run_in_executor(None, self._thread.join, 5.0)
-            if self._thread.is_alive():
-                raise RuntimeError('Could not shut down database thread.')
+        # If close fails (e.g. a transaction is open) leave the worker alive
+        # so the caller can roll back and retry.
+        await self._submit(self.conn.close)
+        self.queue.put(SHUTDOWN)
+        await self.loop.run_in_executor(None, self._thread.join, 5.0)
+        if self._thread.is_alive():
+            raise RuntimeError('Could not shut down database thread.')
+        return True
 
     async def last_insert_rowid(self):
         return await self._submit(self.conn.last_insert_rowid)
@@ -227,12 +240,6 @@ class AsyncSavepoint(_AsyncTransactionWrapper):
 class AsyncAtomic(_AsyncTransactionWrapper):
     def get_wrapper(self):
         return self._sync_conn.atomic(*self._args)
-
-    async def commit(self, *args):
-        await self.conn._submit(partial(self._txn.txn.commit, *args))
-
-    async def rollback(self, *args):
-        await self.conn._submit(partial(self._txn.txn.rollback, *args))
 
 
 def connect(database, **kwargs):

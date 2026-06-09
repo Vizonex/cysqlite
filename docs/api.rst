@@ -366,7 +366,9 @@ Connection
       :raises: :class:`OperationalError` if opening database fails.
 
       All previously-registered user-defined functions, aggregates, window
-      functions and collations will be restored.
+      functions, collations and table functions will be restored, along with
+      any permanent pragmas. Hooks (commit, rollback, update, authorizer,
+      trace and progress) are not restored and must be re-registered.
 
    .. method:: close(force=False)
 
@@ -844,8 +846,9 @@ Connection
       :param bool multi: when ``True``, return all results. Useful for pragmas
          that return multiple rows of data, e.g. ``table_list``.
       :param bool permanent: Restore this pragma if connection closes and is
-         re-opened with ``connect()``. Cannot be combined with ``database``,
-         since attached databases are not restored on reconnect.
+         re-opened with ``connect()``. Requires a ``value`` and cannot be
+         combined with ``database``, since attached databases are not restored
+         on reconnect.
       :return: the value of the specified pragma, or a :class:`Cursor` if ``multi``
          was specified.
 
@@ -942,13 +945,15 @@ Connection
               data_type='INTEGER',
               null=False,
               primary_key=True,
-              table='entry'),
+              table='entry',
+              default=None),
           Column(
               name='title',
               data_type='TEXT',
               null=False,
               primary_key=False,
-              table='entry'),
+              table='entry',
+              default=None),
           ...]
 
    .. method:: get_primary_keys(table, database=None)
@@ -979,7 +984,7 @@ Connection
       .. code-block:: python
 
          print(db.get_foreign_keys('entrytag'))
-         [ForeignKeyMetadata(
+         [ForeignKey(
               column='entry_id',
               dest_table='entry',
               dest_column='id',
@@ -1010,7 +1015,7 @@ Connection
             primary_key=False,
             auto_increment=False)
 
-   .. method:: backup(dest, pages=None, name=None, progress=None, src_name=None)
+   .. method:: backup(dest, pages=None, name=None, progress=None, src_name=None, dest_name=None)
 
       Perform an online backup to the given destination :class:`Connection`.
 
@@ -1022,6 +1027,9 @@ Connection
       :param progress: Progress callback, called with three parameters: the
           number of pages remaining, the total page count, and whether the
           backup is complete.
+      :param str src_name: deprecated alias for ``name``.
+      :param str dest_name: Name of database to write to on the destination
+          connection. Defaults to "main".
 
       Example:
 
@@ -1046,7 +1054,7 @@ Connection
          # Backup the contents of master to replica.
          master.backup(replica, pages=10, progress=progress)
 
-   .. method:: backup_to_file(filename, pages=None, name=None, progress=None, src_name=None)
+   .. method:: backup_to_file(filename, pages=None, name=None, progress=None, src_name=None, dest_name=None)
 
       Perform an online backup to the given destination file.
 
@@ -1058,6 +1066,9 @@ Connection
       :param progress: Progress callback, called with three parameters: the
           number of pages remaining, the total page count, and whether the
           backup is complete.
+      :param str src_name: deprecated alias for ``name``.
+      :param str dest_name: Name of database to write to in the destination
+          file. Defaults to "main".
 
       Example:
 
@@ -1240,7 +1251,8 @@ Connection
       :param fn:
           A callable that is called when the SQL function is invoked.
           The callable must return a type natively supported by SQLite. Set to
-          ``None`` to remove an existing SQL function.
+          ``None`` to remove an existing SQL function, in which case ``name``
+          is required and ``nargs`` must match the original registration.
       :type func: callback | None
       :param str name: name of the SQL function. If unspecified, the name of
           the Python function will be used.
@@ -1389,7 +1401,7 @@ Connection
          # Register our custom window function (roughly identical to SUM).
          db.create_window_function(MySum, 'mysum', 1, True)
 
-   .. method:: create_collation(fn, name)
+   .. method:: create_collation(fn, name=None)
 
       Create a collation named *name* using the collating function *fn*.
       *fn* is passed two :class:`string <str>` arguments, and it should return
@@ -1401,13 +1413,20 @@ Connection
 
       :param fn:
           A callable that is called when comparing values for ordering.
-          Set to ``None`` to remove an existing collation.
+          Set to ``None`` to remove an existing collation, in which case
+          ``name`` is required.
       :type fn: callback | None
       :param str name: name of the SQL collation. If unspecified, the name of
           the Python function will be used.
 
       Collations are automatically re-registered if the connection is closed and
       then re-opened.
+
+      .. note::
+          SQLite provides no way for a collating function to signal an error,
+          so an exception raised by *fn* does not abort the query. The
+          exception is available via :attr:`~Connection.callback_error`, and
+          the query proceeds as if the values compared equal.
 
       The following example shows a reverse sorting collation:
 
@@ -1606,6 +1625,10 @@ Connection
 
       Callback takes zero arguments and returns ``0`` to allow progress to
       continue or any non-zero value to interrupt progress.
+
+      An exception raised by the callback does not interrupt the operation.
+      The exception is recorded on :attr:`~Connection.callback_error` and the
+      query proceeds; return a non-zero value to interrupt.
 
       Example:
 
@@ -2476,7 +2499,7 @@ Transaction Wrappers
 
    .. method:: rollback()
 
-      Explicitly roll backthe transaction/savepoint. A new transaction/savepoint
+      Explicitly roll back the transaction/savepoint. A new transaction/savepoint
       will begin automatically.
 
 
@@ -2792,6 +2815,8 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
 
        Register the table function with the :class:`Connection`. Table-valued
        functions **must** be registered before they can be used in a query.
+       Table functions are automatically re-registered if the connection is
+       closed and then re-opened.
 
        Example:
 

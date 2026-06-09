@@ -1,6 +1,7 @@
 from cysqlite._cysqlite import (
     Blob,
     Connection,
+    Cursor,
     Row,
     TableFunction,
     compile_option,
@@ -15,6 +16,7 @@ from cysqlite._cysqlite import (
     sqlite_version_info,
     status,
     threadsafety,
+    vfs_list,
 )
 from cysqlite._constants import *
 from cysqlite.exceptions import *

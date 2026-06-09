@@ -178,6 +178,9 @@ cdef inline check_connection(Connection conn):
     if conn.db == NULL:
         raise OperationalError('Cannot operate on closed database.')
 
+cdef inline unicode _quote_ident(name):
+    return '"%s"' % str(name).replace('"', '""')
+
 
 cdef class Row(object):
     cdef:
@@ -533,7 +536,7 @@ cdef class Statement(object):
                     nbytes)
             else:
                 raise OperationalError(
-                    'error: cannot read parameter %d: type = %r'
+                    'error: cannot read column %d: type = %r'
                     % (i, coltype))
 
             if has_converters and value is not None:
@@ -687,10 +690,12 @@ cdef class Cursor(object):
         if not seq_of_params:
             return self
 
+        ran = False
         self.stmt = self.conn.stmt_get(sql)
         self.executing = True
         try:
             for params in seq_of_params:
+                ran = True
                 self.stmt.bind(params)
 
                 self.step_status = self.stmt.step()
@@ -708,7 +713,10 @@ cdef class Cursor(object):
             self.abort()
             raise
 
-        self.lastrowid = self.conn.last_insert_rowid()
+        # Only report lastrowid when something actually executed, otherwise
+        # we would report a stale value from a previous statement.
+        if ran:
+            self.lastrowid = self.conn.last_insert_rowid()
         self.finish()
         return self
 
@@ -1069,7 +1077,10 @@ cdef class Connection(_callable_context_manager):
                 self.pragma(key, value)
 
         for (kind, fn, name, n, det) in list(self.registrations.values()):
-            self._register(kind, fn, name, n, det)
+            if kind == 'tablefunc':
+                self._register_table_function(fn)
+            else:
+                self._register(kind, fn, name, n, det)
 
         return True
 
@@ -1101,10 +1112,8 @@ cdef class Connection(_callable_context_manager):
         return exc
 
     cdef Statement stmt_get(self, sql):
-        cdef Statement st
-        if sql in self.stmt_available:
-            st = self.stmt_available.pop(sql)
-        else:
+        cdef Statement st = self.stmt_available.pop(sql, None)
+        if st is None:
             st = Statement(self, sql)
         self.stmt_in_use[id(st)] = st
         return st
@@ -1176,12 +1185,8 @@ cdef class Connection(_callable_context_manager):
             rc = sqlite3_exec(self.db, bsql, _exec_callback, userdata, &errmsg)
             if rc != SQLITE_OK:
                 if errmsg != NULL:
-                    msg = decode(errmsg)
                     sqlite3_free(errmsg)
-                    errmsg = NULL
-                else:
-                    msg = decode(sqlite3_errmsg(self.db))
-                raise OperationalError(f'error executing query: {msg}')
+                raise_sqlite_error(self, 'error executing query: ')
         finally:
             if callback is not None:
                 Py_DECREF(ctx)
@@ -1234,7 +1239,7 @@ cdef class Connection(_callable_context_manager):
 
     def autocommit(self):
         check_connection(self)
-        return sqlite3_get_autocommit(self.db)
+        return sqlite3_get_autocommit(self.db) != 0
 
     @property
     def in_transaction(self):
@@ -1258,12 +1263,14 @@ cdef class Connection(_callable_context_manager):
             # database-qualified pragma cannot be replayed on reconnect.
             raise ValueError('permanent pragmas cannot be database-qualified')
         if database is not None:
-            key = f'"{database}".{key}'
+            key = f'{_quote_ident(database)}.{key}'
         sql = f'PRAGMA {key}'
         if value is not SENTINEL:
             sql += ' = %s' % (value if value is not None else 0)
             if permanent:
                 self.pragmas[key] = value
+        elif permanent:
+            raise ValueError('permanent pragmas require a value')
 
         curs = self.execute(sql)
         if multi:
@@ -1275,27 +1282,28 @@ cdef class Connection(_callable_context_manager):
             return row[0] if row else None
 
     def get_tables(self, database=None):
-        database = database or 'main'
-        stmt = self.execute(f'SELECT name FROM "{database}".sqlite_master '
+        database = _quote_ident(database or 'main')
+        stmt = self.execute(f'SELECT name FROM {database}.sqlite_master '
                             'WHERE type=? ORDER BY name', ('table',))
         return [row for row, in stmt]
 
     def get_views(self, database=None):
-        database = database or 'main'
-        sql = (f'SELECT name, sql FROM "{database}".sqlite_master WHERE type=? '
+        database = _quote_ident(database or 'main')
+        sql = (f'SELECT name, sql FROM {database}.sqlite_master WHERE type=? '
                'ORDER BY name')
         return [View(*row) for row in self.execute(sql, ('view',))]
 
     def get_indexes(self, table, database=None):
-        database = database or 'main'
-        query = (f'SELECT name, sql FROM "{database}".sqlite_master '
+        database = _quote_ident(database or 'main')
+        query = (f'SELECT name, sql FROM {database}.sqlite_master '
                  'WHERE tbl_name = ? AND type = ? ORDER BY name')
         stmt = self.execute(query, (table, 'index'))
         index_to_sql = dict(stmt)
 
         # Determine which indexes have a unique constraint.
         unique_indexes = set()
-        stmt = self.execute(f'PRAGMA "{database}".index_list("{table}")')
+        stmt = self.execute(f'PRAGMA {database}.'
+                            f'index_list({_quote_ident(table)})')
         for row in stmt:
             name = row[1]
             is_unique = int(row[2]) == 1
@@ -1306,7 +1314,7 @@ cdef class Connection(_callable_context_manager):
         index_columns = {}
         for index_name in sorted(index_to_sql):
             stmt = self.execute(
-                f'PRAGMA "{database}".index_info("{index_name}")')
+                f'PRAGMA {database}.index_info({_quote_ident(index_name)})')
             index_columns[index_name] = [row[2] for row in stmt]
 
         return [
@@ -1319,19 +1327,22 @@ cdef class Connection(_callable_context_manager):
             for name in sorted(index_to_sql)]
 
     def get_columns(self, table, database=None):
-        database = database or 'main'
-        stmt = self.execute(f'PRAGMA "{database}".table_info("{table}")')
+        database = _quote_ident(database or 'main')
+        stmt = self.execute(f'PRAGMA {database}.'
+                            f'table_info({_quote_ident(table)})')
         return [Column(r[1], r[2], not r[3], bool(r[5]), table, r[4])
                 for r in stmt]
 
     def get_primary_keys(self, table, database=None):
-        database = database or 'main'
-        stmt = self.execute(f'PRAGMA "{database}".table_info("{table}")')
+        database = _quote_ident(database or 'main')
+        stmt = self.execute(f'PRAGMA {database}.'
+                            f'table_info({_quote_ident(table)})')
         return [row[1] for row in filter(lambda r: r[-1], stmt)]
 
     def get_foreign_keys(self, table, database=None):
-        database = database or 'main'
-        stmt = self.execute(f'PRAGMA "{database}".foreign_key_list("{table}")')
+        database = _quote_ident(database or 'main')
+        stmt = self.execute(f'PRAGMA {database}.'
+                            f'foreign_key_list({_quote_ident(table)})')
         return [ForeignKey(row[3], row[2], row[4], table) for row in stmt]
 
     def table_column_metadata(self, table, column, database=None):
@@ -1382,19 +1393,22 @@ cdef class Connection(_callable_context_manager):
         return Atomic(self, lock)
 
     def backup(self, Connection dest, pages=None, name=None, progress=None,
-               src_name=None):
+               src_name=None, dest_name=None):
+        # src_name is a deprecated alias for name (the source database).
         check_connection(self)
         cdef:
-            bytes bname = encode(name or 'main')
-            bytes bsrcname = encode(src_name or 'main')
+            bytes bsrcname = encode(name or src_name or 'main')
+            bytes bdestname = encode(dest_name or 'main')
             int page_step = pages or -1
+            int busy_ms = 0
+            int timeout_ms = int(self.timeout * 1000)
             int rc = 0
             sqlite3_backup *backup
 
         if not dest.db:
             raise OperationalError('destination database is closed')
 
-        backup = sqlite3_backup_init(dest.db, bname, self.db, bsrcname)
+        backup = sqlite3_backup_init(dest.db, bdestname, self.db, bsrcname)
         if backup == NULL:
             raise_sqlite_error(dest, 'error initializing backup: ')
 
@@ -1410,8 +1424,12 @@ cdef class Connection(_callable_context_manager):
                     progress(remaining, page_count, rc == SQLITE_DONE)
 
                 if rc == SQLITE_BUSY or rc == SQLITE_LOCKED:
+                    if busy_ms >= timeout_ms:
+                        raise DatabaseLockedError(
+                            'backup timed out waiting for lock')
                     with nogil:
                         sqlite3_sleep(250)
+                    busy_ms += 250
                 elif rc == SQLITE_DONE:
                     break
                 elif rc != SQLITE_OK:
@@ -1425,10 +1443,10 @@ cdef class Connection(_callable_context_manager):
             raise_sqlite_error(dest, 'error backing up database: ')
 
     def backup_to_file(self, filename, pages=None, name=None, progress=None,
-                       src_name=None):
+                       src_name=None, dest_name=None):
         cdef Connection dest = Connection(filename)
         try:
-            self.backup(dest, pages, name, progress, src_name)
+            self.backup(dest, pages, name, progress, src_name, dest_name)
         finally:
             dest.close()
 
@@ -1464,6 +1482,8 @@ cdef class Connection(_callable_context_manager):
         PyObject_GetBuffer(data, &view, PyBUF_SIMPLE)
         try:
             sz = view.len
+            if sz == 0:
+                raise ValueError('cannot deserialize an empty buffer')
             buf = <unsigned char *>sqlite3_malloc64(sz)
             if buf == NULL:
                 raise MemoryError('sqlite3_malloc64 failed')
@@ -1532,17 +1552,40 @@ cdef class Connection(_callable_context_manager):
 
     cdef _register(self, kind, fn, name, nargs, deterministic):
         # Register user-defined scalar/aggregate/window/collation, and hand
-        # ownership of the `_Callback` to SQLite.
+        # ownership of the `_Callback` to SQLite. A fn of None removes the
+        # matching registration.
         check_connection(self)
         cdef:
-            _Callback callback = _Callback.__new__(_Callback, self, fn)
+            _Callback callback
             bytes bname = encode(name)
             int flags = SQLITE_UTF8
-            int rc
+            int rc = 0
+
+        if kind not in ('function', 'aggregate', 'window', 'collation'):
+            raise ValueError('Unrecognized registration kind: %s' % kind)
+
+        if fn is None:
+            if kind == 'collation':
+                rc = sqlite3_create_collation_v2(
+                    self.db, <const char *>bname, SQLITE_UTF8, NULL, NULL,
+                    NULL)
+                self.registrations.pop((name, nargs, kind), None)
+            else:
+                # Scalar, aggregate and window functions share a registry, so
+                # an all-NULL registration removes whichever kind matches.
+                rc = sqlite3_create_function_v2(
+                    self.db, bname, <int>nargs, flags, NULL, NULL, NULL, NULL,
+                    NULL)
+                for k in ('function', 'aggregate', 'window'):
+                    self.registrations.pop((name, nargs, k), None)
+            if rc != SQLITE_OK:
+                raise_sqlite_error(self, 'error removing %s: ' % kind)
+            return
 
         if deterministic:
             flags |= SQLITE_DETERMINISTIC
 
+        callback = _Callback.__new__(_Callback, self, fn)
         Py_INCREF(callback)  # Matching decref in _free_cb.
 
         if kind == 'function':
@@ -1587,12 +1630,12 @@ cdef class Connection(_callable_context_manager):
                 <void *>callback,
                 _collation_cb,
                 _free_cb)
-        else:
-            Py_DECREF(callback)
-            raise ValueError('Unrecognized registration kind: %s' % kind)
 
         if rc != SQLITE_OK:
-            # SQLite invokes xDestroy so no need to DECREF here.
+            # SQLite invokes xDestroy on failure for the function APIs, but
+            # explicitly does not for sqlite3_create_collation_v2.
+            if kind == 'collation':
+                Py_DECREF(callback)
             raise_sqlite_error(self, 'error creating %s: ' % kind)
 
         self.registrations[(name, nargs, kind)] = (
@@ -1603,20 +1646,35 @@ cdef class Connection(_callable_context_manager):
             deterministic)
 
     def create_function(self, fn, name=None, nargs=-1, deterministic=True):
+        if fn is None and name is None:
+            raise ValueError('name is required when removing a function')
         self._register('function', fn, name or fn.__name__, nargs,
                        deterministic)
 
     def create_aggregate(self, agg, name=None, nargs=-1, deterministic=True):
+        if agg is None and name is None:
+            raise ValueError('name is required when removing an aggregate')
         self._register('aggregate', agg, name or agg.__name__, nargs,
                        deterministic)
 
     def create_window_function(self, agg, name=None, nargs=-1,
                                deterministic=True):
+        if agg is None and name is None:
+            raise ValueError('name is required when removing a window '
+                             'function')
         self._register('window', agg, name or agg.__name__, nargs,
                        deterministic)
 
     def create_collation(self, fn, name=None):
+        if fn is None and name is None:
+            raise ValueError('name is required when removing a collation')
         self._register('collation', fn, name or fn.__name__, 0, True)
+
+    cdef _register_table_function(self, table_function):
+        cdef _TableFunctionImpl impl = _TableFunctionImpl(table_function, self)
+        impl.create_module(self)
+        self.registrations[(impl.name, 0, 'tablefunc')] = (
+            'tablefunc', table_function, impl.name, 0, False)
 
     def commit_hook(self, fn):
         check_connection(self)
@@ -2205,13 +2263,12 @@ cdef int _progress_cb(void *data) noexcept with gil:
     cdef _Callback cb = <_Callback>data
     # If returns non-zero, the operation is interrupted.
     try:
-        ret = cb.fn() or 0
+        return 1 if cb.fn() else 0
     except Exception as exc:
         cb.conn._callback_error = exc
         if cb.conn.print_callback_tracebacks:
             traceback.print_exc()
-        ret = SQLITE_OK
-    return <int>ret
+        return SQLITE_OK
 
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) noexcept with gil:
@@ -2297,7 +2354,7 @@ cdef class Savepoint(_callable_context_manager):
     def __init__(self, Connection conn, sid=None):
         self.conn = conn
         self.sid = sid or 's' + uuid.uuid4().hex
-        self.quoted_sid = f'"{self.sid}"'
+        self.quoted_sid = _quote_ident(self.sid)
 
     def _begin(self):
         self.conn._execute_internal(f'SAVEPOINT {self.quoted_sid}')
@@ -2351,6 +2408,12 @@ cdef class Atomic(_callable_context_manager):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.txn.__exit__(exc_type, exc_val, exc_tb)
+
+    def commit(self, begin=True):
+        self.txn.commit(begin)
+
+    def rollback(self):
+        self.txn.rollback()
 
 
 cdef inline int _check_blob(Blob blob) except -1:
@@ -3340,7 +3403,7 @@ cdef class _TableFunctionImpl(object):
             Py_DECREF(self)
             raise_sqlite_error(
                 conn,
-                'failed to register table fucntion %s: ' % self.name)
+                'failed to register table function %s: ' % self.name)
 
         return True
 
@@ -3378,8 +3441,8 @@ class TableFunction(object):
         if cls.columns is None:
             raise ProgrammingError(f'{cls.__name__}.columns must be defined')
 
-        cdef _TableFunctionImpl impl = _TableFunctionImpl(cls, conn)
-        impl.create_module(conn)
+        # Stored in conn.registrations so it is replayed on reconnect.
+        conn._register_table_function(cls)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -3408,7 +3471,8 @@ class TableFunction(object):
 
         Called once per query after the SQL parameters are bound. The
         ``filters`` keyword arguments correspond to the names declared in
-        ``params``, missing parameters given as ``None``.
+        ``params``. Parameters not constrained by the query are omitted, so
+        declare a default for each, e.g. ``def initialize(self, n=None)``.
         """
         raise NotImplementedError
 
@@ -3875,6 +3939,9 @@ cdef class median(object):
         self.ct += 1
 
     def inverse(self, item):
+        if item is None:
+            return
+
         cdef int lo = 0, hi = self.ct, mid
         while lo < hi:
             mid = (lo + hi) >> 1

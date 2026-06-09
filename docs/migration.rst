@@ -278,7 +278,7 @@ Behaviors that change in your tests
 What you gain
 -------------
 
-* :ref:`atomic` for nested transactions without manual savepoints.
+* :meth:`Connection.atomic` for nested transactions without manual savepoints.
 * Five ``IntegrityError`` and four ``OperationalError`` subclasses;
   failing SQL embedded in error messages.
 * Built-in :func:`dict_factory`, :func:`rank_bm25`, :func:`rank_lucene`,
