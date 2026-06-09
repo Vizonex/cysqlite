@@ -27,7 +27,6 @@ from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.unicode cimport PyUnicode_AsUTF8AndSize
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 from cpython.unicode cimport PyUnicode_FromString
-from libc.float cimport DBL_MAX
 from libc.limits cimport INT_MAX
 from libc.math cimport log
 from libc.math cimport sqrt
@@ -1257,6 +1256,10 @@ cdef class Connection(_callable_context_manager):
 
     def pragma(self, key, value=SENTINEL, database=None, multi=False,
                permanent=False):
+        if permanent and database is not None:
+            # Attached databases are not restored by connect(), so a
+            # database-qualified pragma cannot be replayed on reconnect.
+            raise ValueError('permanent pragmas cannot be database-qualified')
         if database is not None:
             key = f'"{database}".{key}'
         sql = f'PRAGMA {key}'
@@ -3208,8 +3211,11 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
             pIdxInfo.estimatedCost = <double>1
             pIdxInfo.estimatedRows = 10
         else:
-            # Penalize score based on number of missing params.
-            pIdxInfo.estimatedCost = DBL_MAX - <double>(nParams - nArg)
+            # Penalize the plan for each missing parameter. The cost must
+            # stay huge (so better-constrained plans always win) but also
+            # distinguishable per missing param -- subtracting from DBL_MAX
+            # does not work, as DBL_MAX - k == DBL_MAX for small k.
+            pIdxInfo.estimatedCost = 1e99 * <double>(nParams - nArg)
             pIdxInfo.estimatedRows = 10 * (nParams - nArg)
 
         # Store a reference to the columns in the index info structure.

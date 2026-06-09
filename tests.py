@@ -2670,6 +2670,20 @@ class TestDatabaseSettings(BaseTestCase):
         self.db.connect()
         self.assertEqual(self.db.pragma('cache_size'), -234)
 
+    def test_pragma_permanent_database(self):
+        self.db.attach(':memory:', 'aux1')
+
+        # Database-qualified pragmas work...
+        self.db.pragma('cache_size', -4321, database='aux1')
+        self.assertEqual(self.db.pragma('cache_size', database='aux1'), -4321)
+
+        # ...but cannot be persisted: attached databases are not restored
+        # on reconnect, so the stored pragma could not be replayed.
+        with self.assertRaises(ValueError):
+            self.db.pragma('cache_size', -4321, database='aux1',
+                           permanent=True)
+        self.db.detach('aux1')
+
     def test_pragmas_settings(self):
         self.db.execute('pragma foreign_keys = 1')
         self.assertEqual(self.db.get_foreign_keys_enabled(), 1)
@@ -3775,6 +3789,19 @@ class TestTableFunction(BaseTestCase):
         assertSeries((4, 0, -1), [4, 3, 2], 'LIMIT 3')
         assertSeries((3, 5, 3), [3])
         assertSeries((3, 3, 1), [3])
+
+    def test_series_partial_params(self):
+        # Only a subset of the params is constrained: the partially-
+        # constrained plan is used and missing params fall back to the
+        # initialize() defaults.
+        Series.register(self.db)
+        curs = self.db.execute('SELECT value FROM series '
+                               'WHERE start = 2 AND step = 3 LIMIT 3')
+        self.assertEqual([v for v, in curs], [2, 5, 8])
+
+        curs = self.db.execute('SELECT value FROM series '
+                               'WHERE start = 2 AND stop = 4')
+        self.assertEqual([v for v, in curs], [2, 3, 4])
 
     def test_series_tbl(self):
         Series.register(self.db)

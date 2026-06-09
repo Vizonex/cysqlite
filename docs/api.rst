@@ -844,7 +844,8 @@ Connection
       :param bool multi: when ``True``, return all results. Useful for pragmas
          that return multiple rows of data, e.g. ``table_list``.
       :param bool permanent: Restore this pragma if connection closes and is
-         re-opened with ``connect()``.
+         re-opened with ``connect()``. Cannot be combined with ``database``,
+         since attached databases are not restored on reconnect.
       :return: the value of the specified pragma, or a :class:`Cursor` if ``multi``
          was specified.
 
