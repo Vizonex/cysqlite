@@ -729,8 +729,6 @@ cdef class Cursor(object):
 
         if isinstance(sql, str):
             zsql = PyUnicode_AsUTF8(<str>sql)
-            if not zsql:
-                raise MemoryError
         else:
             raise ValueError('sql script must be string')
 
@@ -744,6 +742,13 @@ cdef class Cursor(object):
                 raise_sqlite_error_sql(self.conn, 'error executing query: ',
                                        sql)
 
+            # Prepare succeeds with a NULL statement when the segment is only
+            # whitespace, comments or semicolons.
+            if st == NULL:
+                if tail[0] == 0:
+                    break
+                continue
+
             rc = SQLITE_ROW
             while rc == SQLITE_ROW:
                 with nogil:
@@ -751,22 +756,14 @@ cdef class Cursor(object):
 
             if rc != SQLITE_DONE:
                 with nogil:
-                    rc = sqlite3_finalize(st)
+                    sqlite3_finalize(st)
+                raise_sqlite_error_sql(self.conn, 'error executing query: ',
+                                       sql)
 
-                st = NULL
-
-                # MISUSE is returned if statement is empty, so make sure we
-                # actually have an error.
-                code = sqlite3_errcode(self.conn.db)
-                if code != 0:
-                    raise_sqlite_error_sql(
-                        self.conn, 'error executing query: ', sql)
-
-            if st != NULL:
-                with nogil:
-                    rc = sqlite3_finalize(st)
-                if rc != SQLITE_OK:
-                    raise_sqlite_error(self.conn, 'error finalizing: ')
+            with nogil:
+                rc = sqlite3_finalize(st)
+            if rc != SQLITE_OK:
+                raise_sqlite_error(self.conn, 'error finalizing: ')
 
             if tail[0] == 0:
                 break

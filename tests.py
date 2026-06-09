@@ -814,6 +814,15 @@ class TestExecute(BaseTestCase):
         curs.executescript('')
         curs.executescript('   \n  \t  ')
         curs.executescript(';;;')
+        curs.executescript('-- comment only')
+        curs.executescript('/* comment */ ;; -- trailing\n')
+        curs.executescript('select 1; ')
+        curs.executescript('create table esc (a);\n'
+                           '-- comment\n'
+                           ';\n'
+                           'insert into esc values (1); ')
+        self.assertEqual(self.db.execute('select a from esc').fetchall(),
+                         [(1,)])
 
     def test_execute_invalid_sql(self):
         with self.assertRaises(OperationalError) as ctx:
