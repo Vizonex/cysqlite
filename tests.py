@@ -735,6 +735,54 @@ class TestExecute(BaseTestCase):
         _, in_use_after = self.db.get_stmt_usage()
         self.assertEqual(in_use_after, in_use_before)
 
+    def test_executemany_error_cursor_state(self):
+        # A failed executemany() must not leave the cursor in an executing
+        # state: a subsequent fetch must not step the broken statement.
+        self.db.execute('create table em (a)')
+        cursor = self.db.cursor()
+
+        # Compile error: statement never acquired.
+        with self.assertRaises(OperationalError):
+            cursor.executemany('insert into missing (a) values (?)', [(1,)])
+        self.assertIsNone(cursor.fetchone())
+
+        # Bind error: previously left a stale step-status, causing the next
+        # fetch to execute the statement with cleared (NULL) bindings.
+        cursor.execute('select 1 union select 2')
+        with self.assertRaises(OverflowError):
+            cursor.executemany('insert into em (a) values (?)', [(2 ** 70,)])
+        self.assertIsNone(cursor.fetchone())
+        self.assertEqual(self.db.execute('select count(*) from em').scalar(),
+                         0)
+
+        # Cursor remains usable.
+        self.assertEqual(cursor.execute('select 1').fetchone(), (1,))
+
+    def test_bind_unsupported_type(self):
+        class Custom(object): pass
+        for value in ([1, 2], {'k': 'v'}, {1, 2}, (1, 2), Custom()):
+            with self.assertRaises(TypeError):
+                self.db.execute('select ?', (value,))
+
+        # Subclasses of the supported date/datetime types continue to work.
+        class DT(datetime.datetime): pass
+        class D(datetime.date): pass
+        res = self.db.execute_one('select ?, ?, ?', (
+            DT(2026, 1, 2, 3, 4, 5), D(2026, 2, 3), uuid.UUID(int=13)))
+        self.assertEqual(res, ('2026-01-02 03:04:05', '2026-02-03',
+                               '00000000-0000-0000-0000-00000000000d'))
+
+    def test_cursor_columns_no_statement(self):
+        cursor = self.db.cursor()
+        self.assertEqual(cursor.columns(), [])
+
+        # DML cursors have no active statement once complete.
+        curs = self.db.execute('create table cc (a, b)')
+        self.assertEqual(curs.columns(), [])
+
+        curs = self.db.execute('select 1 as x, 2 as y')
+        self.assertEqual(curs.columns(), ['x', 'y'])
+
     def test_executescript(self):
         self.db.executescript("""
             BEGIN;
@@ -2013,6 +2061,37 @@ class TestUserDefinedCallbacks(BaseTestCase):
             val = self.db.execute('select value_conv(?)', (i,)).scalar()
             self.assertEqual(val, VAL_CONVERSION_TESTS[i][1])
 
+    def test_function_result_conversion_error(self):
+        # An error converting the function result is reported as a query
+        # error with the original exception chained as __cause__, rather
+        # than silently producing NULL.
+        def badbuf():
+            return memoryview(b'abcdef')[::2]  # Non-contiguous buffer.
+        self.db.create_function(badbuf, 'badbuf', 0)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select badbuf()')
+        self.assertIsInstance(ctx.exception.__cause__, BufferError)
+
+        def baddict():
+            return {'k': 'v'}
+        self.db.create_function(baddict, 'baddict', 0)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select baddict()')
+        self.assertIsInstance(ctx.exception.__cause__, TypeError)
+
+        # Connection remains usable.
+        self.assertEqual(self.db.execute('select 1').fetchone(), (1,))
+
+    def test_function_invalid_utf8_argument(self):
+        # Errors converting function arguments (e.g. TEXT containing invalid
+        # UTF-8) are likewise surfaced with the original error as __cause__.
+        def fn(s):
+            return s
+        self.db.create_function(fn, 'fn_utf8', 1)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute("select fn_utf8(CAST(x'ff80' AS TEXT))")
+        self.assertIsInstance(ctx.exception.__cause__, UnicodeDecodeError)
+
     def test_registrations_survive_reconnect(self):
         self.db.create_function(lambda a: a + a, 'dbl', 1)
         self.db.create_function(lambda a, b: a + a + b + b, 'dbl', 2)
@@ -2533,6 +2612,14 @@ class TestDatabaseSettings(BaseTestCase):
             'kv', 'key', 'TEXT', 'BINARY', 1, 0, 0))
         self.assertEqual(self.db.table_column_metadata('kv', 'extra'), (
             'kv', 'extra', 'INTEGER', 'BINARY', 0, 0, 0))
+
+    def test_table_column_metadata_untyped(self):
+        # Columns with no declared type report a NULL (None) data-type.
+        self.db.execute('create table untyped (a, b INTEGER)')
+        self.assertEqual(self.db.table_column_metadata('untyped', 'a'), (
+            'untyped', 'a', None, 'BINARY', 0, 0, 0))
+        self.assertEqual(self.db.table_column_metadata('untyped', 'b'), (
+            'untyped', 'b', 'INTEGER', 'BINARY', 0, 0, 0))
 
     def test_read_metadata(self):
         self.assertEqual(self.db.get_tables(), ['kv'])
@@ -3833,6 +3920,24 @@ class TestTableFunction(BaseTestCase):
                 expected.append((n, v))
         self.assertEqual(sorted(rows), sorted(expected))
 
+    def test_column_conversion_error(self):
+        # A column value that cannot be converted to a SQLite value raises,
+        # chaining the conversion error as __cause__.
+        class BadValue(TableFunction):
+            columns = ['v']
+            params = []
+            name = 'badvalue'
+            def initialize(self): pass
+            def iterate(self, idx):
+                if idx > 0:
+                    raise StopIteration
+                return ({'not': 'supported'},)
+
+        BadValue.register(self.db)
+        with self.assertRaises(OperationalError) as ctx:
+            self.db.execute('select v from badvalue()').fetchall()
+        self.assertIsInstance(ctx.exception.__cause__, TypeError)
+
 
 class TestTableFunctionRefactor(BaseTestCase):
     filename = ':memory:'
@@ -4298,6 +4403,18 @@ class TestAIOConnection(unittest.IsolatedAsyncioTestCase):
             await db.execute('select 1')
             self.assertFalse(db.conn.is_closed())
         self.assertTrue(db.conn.is_closed())
+
+    async def test_del_shuts_down_worker(self):
+        # Simulate GC of an unclosed connection: the worker thread must be
+        # told to close the connection and shut down.
+        db = aconnect(':memory:')
+        await db.execute('select 1')
+        thread, conn = db._thread, db.conn
+        db.__del__()
+        await asyncio.get_running_loop().run_in_executor(
+            None, thread.join, 5.0)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(conn.is_closed())
 
         with self.assertRaises(ValueError):
             async with aconnect(':memory:') as db:

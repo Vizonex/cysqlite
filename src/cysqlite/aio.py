@@ -23,8 +23,9 @@ class AsyncConnection(object):
         self._thread.start()
 
     def __del__(self):
-        if self._thread.is_alive():
-            self.queue.put((self._conn.close, None))
+        thread = getattr(self, '_thread', None)
+        if thread is not None and thread.is_alive():
+            self.queue.put((self.conn.close, None))
             self.queue.put(SHUTDOWN)
 
     def _run(self):

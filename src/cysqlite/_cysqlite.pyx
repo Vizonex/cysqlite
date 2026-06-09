@@ -408,8 +408,6 @@ cdef class Statement(object):
                 rc = sqlite3_bind_int64(self.st, i + 1, param)
             elif isinstance(param, unicode):
                 buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
-                if buf == NULL:
-                    raise ValueError('Invalid UTF8 data')
                 rc = sqlite3_bind_text64(self.st, i + 1, buf,
                                          <sqlite3_uint64>nbytes,
                                          SQLITE_TRANSIENT,
@@ -425,8 +423,7 @@ cdef class Statement(object):
                     SQLITE_TRANSIENT)
             elif PyObject_CheckBuffer(param):
                 # bytearray, memoryview, (bytes).
-                if PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO):
-                    raise TypeError('Object does not support readable buffer.')
+                PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO)
                 rc = sqlite3_bind_blob64(self.st, i + 1, view.buf,
                                          <sqlite3_uint64>(view.len),
                                          SQLITE_TRANSIENT)
@@ -435,15 +432,18 @@ cdef class Statement(object):
                 # Decimal, Fraction, e.g.
                 rc = sqlite3_bind_double(self.st, i + 1, float(param))
             else:
-                if type(param) is datetime.datetime:
+                if isinstance(param, datetime.datetime):
                     param = param.isoformat(' ')
-                elif type(param) is datetime.date:
+                elif isinstance(param, datetime.date):
                     param = param.isoformat()
-                else:
+                elif isinstance(param, uuid.UUID):
                     param = str(param)
+                else:
+                    raise TypeError(
+                        'cannot bind parameter %d: type %s is not supported; '
+                        'register an adapter to convert it'
+                        % (i + 1, type(param).__name__))
                 buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
-                if buf == NULL:
-                    raise ValueError('Invalid UTF8 data')
                 rc = sqlite3_bind_text64(self.st, i + 1, buf,
                                          <sqlite3_uint64>nbytes,
                                          SQLITE_TRANSIENT,
@@ -604,6 +604,9 @@ cdef class Cursor(object):
         self.finish()
 
     cdef set_description(self):
+        if self.stmt is None or self.stmt.st == NULL:
+            return
+
         cdef:
             list columns = self.stmt.columns()
             list description = []
@@ -666,38 +669,43 @@ cdef class Cursor(object):
         return self
 
     cpdef executemany(self, sql, seq_of_params=None):
-        if not seq_of_params:
-            return self
-        elif self.conn.db == NULL:
+        if self.conn.db == NULL:
             self.stmt = None
             self.executing = False
             raise OperationalError('Database is closed.')
-        elif self.executing:
+
+        if self.executing:
             self.finish()
 
         self.description = None
         self.row_converters = None
         self.rowcount = 0
         self.lastrowid = None
-        self.executing = True
+        self.step_status = SQLITE_DONE
+
+        if not seq_of_params:
+            return self
 
         self.stmt = self.conn.stmt_get(sql)
-        for params in seq_of_params:
-            self.stmt.bind(params)
+        self.executing = True
+        try:
+            for params in seq_of_params:
+                self.stmt.bind(params)
 
-            self.step_status = self.stmt.step()
-            if self.step_status == SQLITE_ROW:
-                self.rowcount = -1
-                self.stmt.reset()
-                self.abort()
-                raise OperationalError('executemany() cannot generate results')
-            elif self.step_status == SQLITE_DONE:
+                self.step_status = self.stmt.step()
+                if self.step_status == SQLITE_ROW:
+                    self.rowcount = -1
+                    raise OperationalError(
+                        'executemany() cannot generate results')
+                elif self.step_status != SQLITE_DONE:
+                    raise_sqlite_error_sql(self.conn,
+                                           'error executing query: ', sql)
+
                 self.rowcount = self.rowcount + self.conn.changes()
                 self.stmt.reset()
-            else:
-                self.abort()
-                raise_sqlite_error_sql(self.conn, 'error executing query: ',
-                                       sql)
+        except Exception:
+            self.abort()
+            raise
 
         self.lastrowid = self.conn.last_insert_rowid()
         self.finish()
@@ -859,6 +867,8 @@ cdef class Cursor(object):
     def columns(self):
         if self.description is None:
             self.set_description()
+        if self.description is None:
+            return []
         return [row[0] for row in self.description]
 
 
@@ -1343,11 +1353,13 @@ cdef class Connection(_callable_context_manager):
         if rc != SQLITE_OK:
             raise_sqlite_error(self, 'error getting column metadata: ')
 
+        # Both outputs may be NULL, e.g. the declared type of an untyped
+        # column ("CREATE TABLE t(a)").
         return ColumnMetadata(
             table,
             column,
-            decode(data_type),
-            decode(coll_seq),
+            decode(data_type) if data_type != NULL else None,
+            decode(coll_seq) if coll_seq != NULL else None,
             bool(not_null),
             bool(primary_key),
             bool(auto_increment))
@@ -1444,8 +1456,7 @@ cdef class Connection(_callable_context_manager):
         if sqlite3_get_autocommit(self.db) == 0:
             raise OperationalError('cannot deserialize: transaction active')
 
-        if PyObject_GetBuffer(data, &view, PyBUF_SIMPLE):
-            raise TypeError('data must be a bytes-like object')
+        PyObject_GetBuffer(data, &view, PyBUF_SIMPLE)
         try:
             sz = view.len
             buf = <unsigned char *>sqlite3_malloc64(sz)
@@ -1857,17 +1868,20 @@ cdef void _free_cb(void *p) noexcept with gil:
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
         _Callback cb = <_Callback>sqlite3_user_data(ctx)
-        tuple params = sqlite_to_python(argc, argv)
+        tuple params
 
+    # Argument and result conversion happens inside the try so that
+    # conversion errors are reported via sqlite3_result_error rather than
+    # escaping this noexcept callback (which would leave the result NULL).
     try:
+        params = sqlite_to_python(argc, argv)
         result = cb.fn(*params)
+        python_to_sqlite(ctx, result)
     except Exception as exc:
         cb.conn._callback_error = exc
         if cb.conn.print_callback_tracebacks:
             traceback.print_exc()
         sqlite3_result_error(ctx, b'error in user-defined function', -1)
-    else:
-        python_to_sqlite(ctx, result)
 
 
 ctypedef struct aggregate_ctx:
@@ -1924,9 +1938,9 @@ cdef void _step_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcep
     if not wrapper:
         return
 
-    params = sqlite_to_python(argc, argv)
     try:
-        result = wrapper.aggregate.step(*params)
+        params = sqlite_to_python(argc, argv)
+        wrapper.aggregate.step(*params)
     except Exception as exc:
         wrapper.conn._callback_error = exc
         if wrapper.conn.print_callback_tracebacks:
@@ -1944,13 +1958,12 @@ cdef void _finalize_cb(sqlite3_context *ctx) noexcept with gil:
     wrapper = <_AggregateWrapper>agg_ctx.wrapper
     try:
         result = wrapper.aggregate.finalize()
+        python_to_sqlite(ctx, result)
     except Exception as exc:
         wrapper.conn._callback_error = exc
         if wrapper.conn.print_callback_tracebacks:
             traceback.print_exc()
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
-    else:
-        python_to_sqlite(ctx, result)
 
     Py_DECREF(wrapper)  # Match incref.
     agg_ctx.in_use = 0
@@ -1968,13 +1981,12 @@ cdef void _value_cb(sqlite3_context *ctx) noexcept with gil:
 
     try:
         result = wrapper.aggregate.value()
+        python_to_sqlite(ctx, result)
     except Exception as exc:
         wrapper.conn._callback_error = exc
         if wrapper.conn.print_callback_tracebacks:
             traceback.print_exc()
         sqlite3_result_error(ctx, b'error in user-defined window function', -1)
-    else:
-        python_to_sqlite(ctx, result)
 
 
 cdef void _inverse_cb(sqlite3_context *ctx, int argc, sqlite3_value **params) noexcept with gil:
@@ -2551,9 +2563,7 @@ cdef class Blob(object):
         if remaining == 0:
             return 0
 
-        if PyObject_GetBuffer(b, &view, PyBUF_CONTIG):
-            raise TypeError('readinto() requires a writeable contiguous '
-                            'buffer, e.g. bytearray or memoryview.')
+        PyObject_GetBuffer(b, &view, PyBUF_CONTIG)
         n_read = remaining if <int>view.len >= remaining else <int>view.len
         try:
             if sqlite3_blob_read(self.blob, view.buf, n_read, self.offset):
@@ -2585,15 +2595,12 @@ cdef class Blob(object):
         blob_size = sqlite3_blob_bytes(self.blob)
 
         if PyObject_CheckBuffer(data):
-            if PyObject_GetBuffer(data, &view, PyBUF_CONTIG_RO):
-                raise TypeError('Object does not support readable buffer')
+            PyObject_GetBuffer(data, &view, PyBUF_CONTIG_RO)
             buffer_acquired = True
             buf = view.buf
             buflen = view.len
         elif isinstance(data, str):
             buf = PyUnicode_AsUTF8AndSize(data, &buflen)
-            if buf == NULL:
-                raise ValueError('str could not be encoded as UTF8')
         else:
             raise TypeError('Blob.write() data must be buffer, bytes or str')
 
@@ -2707,10 +2714,7 @@ cdef class Blob(object):
                 if sqlite3_blob_write(self.blob, &byte_val, 1, idx):
                     raise_sqlite_error(self.conn, 'error writing to blob: ')
             else:
-                if PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO):
-                    raise TypeError(
-                        'blob index assignment requires an int or a '
-                        'single-byte buffer-protocol object')
+                PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO)
                 try:
                     if view.len != 1:
                         raise ValueError(
@@ -2731,10 +2735,7 @@ cdef class Blob(object):
             raise ValueError('blob slice step value must be 1')
 
         length = stop - start
-        if PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO):
-            raise TypeError(
-                'blob slice assignment requires a buffer-protocol object '
-                '(e.g. bytes, bytearray, memoryview)')
+        PyObject_GetBuffer(value, &view, PyBUF_CONTIG_RO)
         try:
             if view.len != length:
                 raise ValueError(
@@ -3020,6 +3021,9 @@ cdef int cyColumn(sqlite3_vtab_cursor *pBase, sqlite3_context *ctx,
                   int iCol) noexcept with gil:
     cdef:
         cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        cysqlite_vtab *pVtab
+        Connection conn
+        object table_func_cls
         tuple row_data
 
     if pCur == NULL:
@@ -3040,7 +3044,16 @@ cdef int cyColumn(sqlite3_vtab_cursor *pBase, sqlite3_context *ctx,
         sqlite3_result_error(ctx, encode('column index out of bounds'), -1)
         return SQLITE_ERROR
 
-    return python_to_sqlite(ctx, row_data[iCol])
+    try:
+        return python_to_sqlite(ctx, row_data[iCol])
+    except Exception as exc:
+        pVtab = <cysqlite_vtab *>pBase.pVtab
+        conn = _vtab_connection(pVtab)
+        table_func_cls = <object>pVtab.table_func_cls \
+            if pVtab != NULL and pVtab.table_func_cls != NULL else None
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, table_func_cls, exc,
+                          b'error converting column value: ')
+        return SQLITE_ERROR
 
 
 cdef int cyRowid(sqlite3_vtab_cursor *pBase, sqlite3_int64 *pRowid) noexcept:
@@ -3096,7 +3109,13 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
     else:
         params = []
 
-    py_values = sqlite_to_python(argc, argv)
+    try:
+        py_values = sqlite_to_python(argc, argv)
+    except Exception as exc:
+        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
+                          b'error converting parameters: ')
+        return SQLITE_ERROR
+
     for idx, param in enumerate(params):
         if idx < argc:
             query[param] = py_values[idx]
@@ -3221,8 +3240,8 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
     table_func_cls = <object>pVtab.table_func_cls
     conn = _vtab_connection(pVtab)
 
-    py_values = sqlite_to_python(argc, argv)
     try:
+        py_values = sqlite_to_python(argc, argv)
         table_func = table_func_cls()
 
         # Determine operation type:
@@ -3564,24 +3583,13 @@ cdef python_to_sqlite(sqlite3_context *context, param):
         sqlite3_result_double(context, <double>param)
     elif isinstance(param, unicode):
         buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
-        if buf == NULL:
-            sqlite3_result_error(
-                context,
-                encode('Invalid UTF8 in text data.'),
-                -1)
-            return SQLITE_ERROR
         sqlite3_result_text64(context, buf,
                               <sqlite3_uint64>nbytes,
                               SQLITE_TRANSIENT,
                               SQLITE_UTF8)
     elif PyObject_CheckBuffer(param):
         # bytes, bytearray, memoryview.
-        if PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO):
-            sqlite3_result_error(
-                context,
-                encode('Could not get readable buffer.'),
-                -1)
-            return SQLITE_ERROR
+        PyObject_GetBuffer(param, &view, PyBUF_CONTIG_RO)
         sqlite3_result_blob64(context, view.buf,
                               <sqlite3_uint64>(view.len),
                               SQLITE_TRANSIENT)
@@ -3594,15 +3602,12 @@ cdef python_to_sqlite(sqlite3_context *context, param):
             param = param.isoformat(' ')
         elif isinstance(param, datetime.date):
             param = param.isoformat()
-        else:
+        elif isinstance(param, uuid.UUID):
             param = str(param)
+        else:
+            raise TypeError('cannot convert result of type %s to a SQLite '
+                            'value' % type(param).__name__)
         buf = PyUnicode_AsUTF8AndSize(param, &nbytes)
-        if buf == NULL:
-            sqlite3_result_error(
-                context,
-                encode('Invalid UTF8 in adapted data.'),
-                -1)
-            return SQLITE_ERROR
         sqlite3_result_text64(context, buf,
                               <sqlite3_uint64>nbytes,
                               SQLITE_TRANSIENT,
