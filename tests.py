@@ -2019,7 +2019,7 @@ class TestTransactions(BaseTestCase):
                 except ValueError:
                     pass
 
-            # Table should be empty — all savepoints rolled back.
+            # Table should be empty - all savepoints rolled back.
             self.assertCount(0)
 
             # The real test: if savepoints weren't released, SQLite's

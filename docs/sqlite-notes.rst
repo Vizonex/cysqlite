@@ -202,8 +202,8 @@ adapters and converters:
 
 * Adapters and converters in ``sqlite3`` are registered *globally*. In
   ``cysqlite``, they are scoped to the :class:`Connection`.
-* ``sqlite3`` converters — functions that transform values coming *from*
-  SQLite back into richer Python types — are disabled by default, and are
+* ``sqlite3`` converters - functions that transform values coming *from*
+  SQLite back into richer Python types - are disabled by default, and are
   enabled via the ``detect_types`` parameter on ``connect()``. Two modes
   are available: matching against the column's declared type
   (``PARSE_DECLTYPES``) and matching against a type hint embedded in a
@@ -211,7 +211,7 @@ adapters and converters:
   declared types, and has no column-alias mechanism.
 * ``sqlite3`` has a separate adaptation mechanism that checks for a
   ``__conform__()`` method on the object being bound; the method's return
-  value is used in place of the original. cysqlite has no equivalent —
+  value is used in place of the original. cysqlite has no equivalent -
   bind either a supported type directly, or register an adapter.
 * ``sqlite3`` historically shipped default adapters for ``datetime`` and
   ``date``, and also handled ``datetime`` via two magic type names, but
@@ -434,7 +434,7 @@ the savepoint without affecting the outer transaction:
        try:
            with db.atomic():
                db.execute('insert into users (name) values (?)', ('alice',))
-               # IntegrityError — savepoint is rolled back.
+               # IntegrityError - savepoint is rolled back.
        except IntegrityError:
            pass
 

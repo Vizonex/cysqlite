@@ -20,7 +20,7 @@ If your SQLite workload is heavy enough that avoiding blocking the event-loop
 is an issue, SQLite may not be a good fit. SQLite only allows one writer at a
 time, so while using an async wrapper may keep things responsive while waiting
 to obtain the write lock, writes will not occur "faster", the bottleneck has
-merely been moved. Conversely, if you don’t have that much load, the async
+merely been moved. Conversely, if you don't have that much load, the async
 wrapper adds complexity and overhead for no measurable benefit.
 
 It's like a super fancy restaurant that has only one table. When using SQLite,
@@ -323,7 +323,7 @@ AsyncConnection
              try:
                  async with db.atomic():
                      await db.execute('insert into users (name) values (?)', ('alice',))
-                     # IntegrityError — duplicate. Savepoint is rolled back.
+                     # IntegrityError - duplicate. Savepoint is rolled back.
              except IntegrityError:
                  pass
 

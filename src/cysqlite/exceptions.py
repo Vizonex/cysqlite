@@ -12,7 +12,7 @@ class InternalError(DatabaseError): pass
 class ProgrammingError(DatabaseError): pass
 class NotSupportedError(DatabaseError): pass
 
-# New subclasses — all still IntegrityError for back-compat.
+# New subclasses - all still IntegrityError for back-compat.
 class UniqueIntegrityError(IntegrityError): pass
 class NotNullIntegrityError(IntegrityError): pass
 class ForeignKeyIntegrityError(IntegrityError): pass

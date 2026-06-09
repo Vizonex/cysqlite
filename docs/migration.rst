@@ -38,7 +38,7 @@ Transactions
 The stdlib opens transactions implicitly by string-matching DML
 statements. cysqlite operates in pure autocommit and uses an explicit
 context manager. ``atomic()`` uses a real transaction at the outer
-level and a savepoint when nested — no manual ``SAVEPOINT`` needed.
+level and a savepoint when nested - no manual ``SAVEPOINT`` needed.
 
 .. list-table::
    :header-rows: 1
@@ -121,7 +121,7 @@ Adapters and converters
 -----------------------
 
 stdlib registers globally; cysqlite registers per connection. There is
-no ``detect_types`` flag — converters always consult the declared
+no ``detect_types`` flag - converters always consult the declared
 column type.
 
 .. list-table::

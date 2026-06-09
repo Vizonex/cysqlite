@@ -1096,7 +1096,7 @@ Connection
          # Snapshot the database as bytes.
          snapshot = src.serialize()
 
-         # Write it to disk — it's a valid SQLite file.
+         # Write it to disk - it's a valid SQLite file.
          with open('users.db', 'wb') as f:
              f.write(snapshot)
 
@@ -2966,7 +2966,7 @@ exception hierarchy.
 
 .. class:: OperationalError
 
-   Exception raised for errors that are related to the database’s operation.
+   Exception raised for errors that are related to the database's operation.
    Raised in most cases for errors when working with the database.
 
    **Corresponds to most SQLite error codes.**
