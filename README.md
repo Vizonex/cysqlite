@@ -23,6 +23,10 @@ cysqlite supports standalone builds or dynamic-linking with the system SQLite.
 * Asyncio support
 * Easy to create fully self-contained builds
 
+### Performance
+
+![](https://media.charlesleifer.com/blog/photos/cysqlite-bench.png)
+
 ### Installing
 
 cysqlite can be installed as a pre-built binary wheel with SQLite embedded into
