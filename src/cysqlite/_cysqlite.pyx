@@ -467,15 +467,13 @@ cdef class Statement(object):
         return rc
 
     cdef int reset(self):
-        cdef int rc
-        with nogil:
-            rc = sqlite3_reset(self.st)
-            sqlite3_clear_bindings(self.st)
+        # Cheap calls, not worth a GIL round-trip.
+        cdef int rc = sqlite3_reset(self.st)
+        sqlite3_clear_bindings(self.st)
         return rc
 
     cdef int finalize(self):
-        with nogil:
-            sqlite3_finalize(self.st)
+        sqlite3_finalize(self.st)
         self.st = NULL
         return 0
 
@@ -835,7 +833,7 @@ cdef class Cursor(object):
     cdef abort(self):
         if self.stmt is not None:
             self.stmt.reset()
-            self.conn.stmt_in_use.pop(id(self.stmt), None)
+            self.conn.stmt_in_use.pop(self.stmt, None)
             self.stmt.finalize()
             self.stmt = None
 
@@ -900,7 +898,7 @@ cdef class Connection(_callable_context_manager):
         dict adapters  # Python type -> adapter(value).
         dict registrations  # (name, nargs, kind) -> (kind, fn, name, nargs...)
         dict stmt_available  # sql -> Statement.
-        object stmt_in_use  # id(stmt) -> Statement.
+        object stmt_in_use  # In-use Statements, keyed by identity.
         object blob_in_use  # id(blob) -> Blob.
         int _transaction_depth
         _Callback _commit_hook, _rollback_hook, _update_hook, _auth_hook
@@ -947,7 +945,7 @@ cdef class Connection(_callable_context_manager):
 
     def finalize_statements(self):
         cdef Statement stmt
-        for stmt in list(self.stmt_in_use.values()):
+        for stmt in list(self.stmt_in_use):
             stmt.finalize()
         for stmt in list(self.stmt_available.values()):
             stmt.finalize()
@@ -1115,13 +1113,13 @@ cdef class Connection(_callable_context_manager):
         cdef Statement st = self.stmt_available.pop(sql, None)
         if st is None:
             st = Statement(self, sql)
-        self.stmt_in_use[id(st)] = st
+        self.stmt_in_use[st] = None
         return st
 
     cdef stmt_release(self, Statement st):
         if st.st == NULL:
             raise Exception('Cannot release finalized statement.')
-        self.stmt_in_use.pop(id(st), None)
+        self.stmt_in_use.pop(st, None)
         # We could evict, finalize and replace here, but since the evicted stmt
         # will be garbage-collected automatically it isn't strictly necessary.
         #if st.sql in self.stmt_available:
@@ -1205,7 +1203,7 @@ cdef class Connection(_callable_context_manager):
             self.stmt_release(stmt)
         else:
             stmt.finalize()
-            self.stmt_in_use.pop(id(stmt), None)
+            self.stmt_in_use.pop(stmt, None)
             raise_sqlite_error_sql(self, 'error executing query: ', sql)
 
     def begin(self, lock=None):
