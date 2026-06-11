@@ -3673,7 +3673,7 @@ cdef python_to_sqlite(sqlite3_context *context, param):
     else:
         if isinstance(param, datetime.datetime):
             param = param.isoformat(' ')
-        elif isinstance(param, datetime.date):
+        elif isinstance(param, (datetime.date, datetime.time)):
             param = param.isoformat()
         elif isinstance(param, uuid.UUID):
             param = str(param)
