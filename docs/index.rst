@@ -69,6 +69,7 @@ Example usage:
    installation
    migration
    sqlite-notes
+   functions
    api
    utils
    aio

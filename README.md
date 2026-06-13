@@ -97,3 +97,44 @@ print(row)  # ('k05', 'v05')
 
 db.close()
 ```
+
+### User-defined functions and hooks
+
+cysqlite lets you extend SQLite with ordinary Python callables. Functions and
+collations are registered on the connection and automatically restored if it is
+closed and re-opened:
+
+* **Scalar functions**: `db.create_function(fn)`
+* **Aggregates**: `db.create_aggregate(cls)` (`step()` + `finalize()`)
+* **Window functions**: `db.create_window_function(cls)` (adds `inverse()` + `value()`)
+* **Table-valued functions**: `@db.table_function(columns=[...])` over a generator
+* **Collations**: `db.create_collation(fn)`
+
+Connection hooks observe or veto activity (pass `None` to clear):
+
+* **Commit / rollback hooks**: `db.commit_hook(fn)`, `db.rollback_hook(fn)`
+* **Update hook**: `db.update_hook(fn)` (fires on INSERT, UPDATE or DELETE)
+* **Authorizer**: `db.authorizer(fn)`
+
+```python
+# Scalar function.
+db.create_function(str.title, 'title_case')
+db.execute('select title_case(?)', ('heLLo wOrLd',)).fetchone()  # ('Hello World',)
+
+# Table-valued function from a generator.
+@db.table_function(columns=['value'])
+def series(start, stop, step=1):
+    i = start
+    while i < stop:
+        yield (i,)
+        i += step
+
+list(db.execute('select value from series(0, 10, 2)'))  # [(0,), (2,), (4,), (6,), (8,)]
+
+# Veto a COMMIT from Python (a truthy return turns it into a ROLLBACK).
+readonly = True
+db.commit_hook(lambda: readonly)
+```
+
+See the [user-defined functions guide](https://cysqlite.readthedocs.io/en/latest/functions.html)
+for full examples.
