@@ -35,7 +35,7 @@ cysqlite utilities.
    pool:
 
    * ``journal_mode = wal``
-   * ``cache_size = -64000`` (64MiB page cache)
+   * ``cache_size = -64000`` (64,000 KiB page cache)
    * ``mmap_size = 256 * 1024 * 1024`` (256MiB)
    * ``foreign_keys = 1`` (enable foreign-key constraint enforcement)
 

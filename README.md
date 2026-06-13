@@ -59,7 +59,7 @@ cd cysqlite/
 ./scripts/fetch_sqlcipher  # Will add sqlite3.c and sqlite3.h in checkout.
 
 # Build self-contained cysqlite with SQLCipher embedded.
-pip install .
+SQLCIPHER=1 pip install .
 ```
 
 Alternately, you can create a self-contained build that embeds [SQLite3

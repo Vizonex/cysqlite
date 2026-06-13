@@ -495,6 +495,12 @@ AsyncCursor
 
       :return: scalar value or ``None``.
 
+   .. method:: close()
+      :async:
+
+      Close the cursor, releasing the underlying synchronous :class:`Cursor`.
+      Idempotent.
+
    .. property:: description
 
       Column description tuples for the current result set, or ``None`` if the
@@ -594,7 +600,7 @@ Pool
    pool:
 
    * ``journal_mode = wal``
-   * ``cache_size = -64000`` (64MiB page cache)
+   * ``cache_size = -64000`` (64,000 KiB page cache)
    * ``mmap_size = 256 * 1024 * 1024`` (256MiB)
    * ``foreign_keys = 1`` (enable foreign-key constraint enforcement)
 

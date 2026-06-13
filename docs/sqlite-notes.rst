@@ -218,12 +218,12 @@ adapters and converters:
   ``date``, and also handled ``datetime`` via two magic type names, but
   these are deprecated as of Python 3.12.
 
-cysqlite is more permissive about what types it will accept at bind time. Any
-object with a ``__float__`` method (e.g. ``Decimal``, ``Fraction``) is bound as
-``REAL``, and anything else falls back to ``str(x)`` rather than raising
-``TypeError``. Additionally, cysqlite provides ISO-8601 formatting for
-``datetime`` and ``date`` out of the box with no surprise deprecations.
-Sqlite's built-in `date functions <https://sqlite.org/lang_datefunc.html>`_
+cysqlite is more permissive about what types it will accept at bind time.
+``UUID`` objects are bound as ``TEXT``. Any object with a ``__float__`` method
+(e.g. ``Decimal``, ``Fraction``) is bound as ``REAL``. Unsupported types raise
+``TypeError``, register an adapter to handle them. Additionally, cysqlite
+provides ISO-8601 formatting for ``datetime``, ``date`` and ``time`` out of the
+box with no surprise deprecations.  Sqlite's built-in `date functions <https://sqlite.org/lang_datefunc.html>`_
 work well on ISO-8601 format, so this allows date/times stored by ``cysqlite``
 to be usable with the builtin date functions.
 

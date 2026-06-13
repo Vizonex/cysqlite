@@ -653,7 +653,7 @@ Connection
 
          # Both blocks committed.
 
-         @db.atomic
+         @db.atomic()
          def atomic_function():
              # All queries run inside a transaction (or savepoint) and commit
              # when the function returns, or roll-back if an exception occurs.
@@ -874,7 +874,7 @@ Connection
          print(f'Cache size: {size_in_kb}')
 
          # List all tables in the database.
-         for row in db.pragma('table_list'):
+         for row in db.pragma('table_list', multi=True):
              print(row[1])  # Print just the table name.
 
    .. method:: get_tables(database=None)
@@ -1129,6 +1129,7 @@ Connection
       :raises: :class:`OperationalError` if the connection has an active
          transaction, if the schema name is not attached, or if
          deserialization otherwise fails.
+      :raises: :class:`ValueError` if ``data`` is empty.
       :raises: :class:`MemoryError` if SQLite cannot allocate the backing
          buffer.
 
@@ -1229,6 +1230,8 @@ Connection
 
       :param str name: the path to the SQLite extension.
       :raises: :class:`OperationalError` if extension could not be loaded.
+      :raises: :class:`NotSupportedError` if cysqlite was built without
+         load-extension support.
 
       Example:
 
@@ -1522,10 +1525,6 @@ Connection
 
       :param fn: callable or ``None`` to clear the current authorizer.
       :type fn: callable | None
-      :return:
-          one of :data:`SQLITE_OK`, :data:`SQLITE_IGNORE` or :data:`SQLITE_DENY`.
-
-          .. seealso:: :ref:`authorizer-flags`
 
       Register an authorizer callback. Authorizer callbacks must accept 5
       parameters, which vary depending on the operation being checked.
@@ -1546,6 +1545,8 @@ Connection
       * :data:`SQLITE_IGNORE`: allow statement compilation but prevent
         the operation from occurring.
       * :data:`SQLITE_DENY`: prevent statement compilation.
+
+      .. seealso:: :ref:`authorizer-flags`
 
       Only a single authorizer can be in place on a database connection at a time.
 
@@ -1678,7 +1679,7 @@ Connection
          # Now concurrent writers will use jittered retries instead of a
          # simple flat sleep, reducing lock contention.
 
-   .. method:: enable_load_extension(enabled)
+   .. method:: enable_load_extension(enabled=True)
 
       :param bool enabled: Enable or disable the SQLite builtin ``load_extension`` function.
 
@@ -2147,7 +2148,7 @@ Cursor
    .. attribute:: description
 
       Return a DB-API style description of the row-data for the current query.
-      cysqlite returns a list of tuples containing the individual column names
+      cysqlite returns a tuple of tuples containing the individual column names
       for the query.
 
    .. attribute:: lastrowid
@@ -2748,11 +2749,11 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
       *Optional* - specify rowid for each row returned. Rows returned by the
       ``iterate()`` method must be of form ``(rowid, (row, data, ...))``.
 
-   .. attribute:: print_tracebacks = True
+   .. attribute:: print_tracebacks = False
 
-      Print a full traceback for any errors that occur in the table-function's
-      callback methods. When set to False, only the generic
-      :class:`OperationalError` will be visible.
+      When ``True``, print a full traceback for any errors that occur in the
+      table-function's callback methods. When ``False`` (the default), only the
+      generic :class:`OperationalError` is visible.
 
    .. method:: initialize(**parameter_values)
 
@@ -2839,7 +2840,7 @@ may come up when you're using SQLite.
 .. function:: rank_bm25(...)
 
    `Okapi BM25 <https://en.wikipedia.org/wiki/Okapi_BM25>`_ ranking algorithm
-   for use with SQLite full-text search extensions (FTS4 and FTS5 only).
+   for use with SQLite full-text search extensions (FTS4 only).
 
    Parameters are opaque as function is intended to be called with the output
    of the SQLite `matchinfo(table, 'pcnalx')` function, which provides the
