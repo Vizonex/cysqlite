@@ -4392,6 +4392,130 @@ class TestTableFunctionRefactor(BaseTestCase):
                                (3, 0), (3, 1), (3, 2)])
 
 
+class TestCreateTableFunction(BaseTestCase):
+    filename = ':memory:'
+
+    def values(self, sql, params=None):
+        return [row for row, in self.db.execute(sql, params)]
+
+    def test_generator_positional_args(self):
+        def series(start, stop, step=1):
+            i = start
+            while i < stop:
+                yield (i,)
+                i += step
+
+        self.db.create_table_function(series, columns=['value'])
+        self.assertEqual(self.values('select value from series(0, 5, 1)'),
+                         [0, 1, 2, 3, 4])
+        self.assertEqual(self.values('select value from series(0, 10, 2)'),
+                         [0, 2, 4, 6, 8])
+
+    def test_optional_param_uses_default(self):
+        def series(start, stop, step=1):
+            i = start
+            while i < stop:
+                yield (i,)
+                i += step
+
+        self.db.create_table_function(series, columns=['value'])
+        # step omitted -> falls back to the signature default of 1.
+        self.assertEqual(self.values('select value from series(1, 4)'),
+                         [1, 2, 3])
+
+    def test_all_optional_zero_arg_call(self):
+        # Every param has a default, so the function may be called with no
+        # args at all (cyBestIndex treats defaulted params as optional).
+        def nums(start=0, stop=3):
+            for i in range(start, stop):
+                yield (i,)
+
+        self.db.create_table_function(nums, columns=['value'])
+        self.assertEqual(self.values('select value from nums()'), [0, 1, 2])
+        self.assertEqual(self.values('select value from nums(2, 6)'),
+                         [2, 3, 4, 5])
+
+    def test_required_param_missing_errors(self):
+        def series(start, stop, step=1):
+            i = start
+            while i < stop:
+                yield (i,)
+                i += step
+
+        self.db.create_table_function(series, columns=['value'])
+        # `start`/`stop` have no default -> calling with none of them errors.
+        with self.assertRaises(OperationalError):
+            list(self.db.execute('select value from series()'))
+
+    def test_explicit_null_vs_omitted(self):
+        # An omitted optional param uses the Python default; an explicit NULL
+        # is passed through as None and overrides it. (Column names must differ
+        # from the param/hidden-column names a/b.)
+        def f(a, b='dflt'):
+            yield (a, b)
+
+        self.db.create_table_function(f, columns=['col_a', 'col_b'])
+        self.assertEqual(list(self.db.execute('select col_a, col_b from f(1)')),
+                         [(1, 'dflt')])
+        self.assertEqual(
+            list(self.db.execute('select col_a, col_b from f(1, ?)', (None,))),
+            [(1, None)])
+
+    def test_function_returning_list_and_list_rows(self):
+        def pairs():
+            return [[1, 'a'], [2, 'b']]  # returns a list, rows are lists
+
+        self.db.create_table_function(pairs, columns=['k', 'v'])
+        self.assertEqual(list(self.db.execute('select * from pairs()')),
+                         [(1, 'a'), (2, 'b')])
+
+    def test_name_override(self):
+        def gen():
+            yield ('x',)
+        self.db.create_table_function(gen, name='renamed', columns=['v'])
+        self.assertEqual(self.values('select v from renamed()'), ['x'])
+
+    def test_decorator_registers_and_returns_callable(self):
+        @self.db.table_function(columns=['value'])
+        def series(start, stop):
+            i = start
+            while i < stop:
+                yield (i,)
+                i += 1
+
+        self.assertEqual(self.values('select value from series(0, 3)'),
+                         [0, 1, 2])
+        # The decorator returns the original callable unchanged.
+        self.assertEqual([row for row, in series(0, 2)], [0, 1])
+
+    def test_columns_fallback_to_fn_attribute(self):
+        def gen():
+            yield ('a', 1)
+        gen.columns = ['name', 'n']
+        self.db.create_table_function(gen)  # no columns arg
+        self.assertEqual(list(self.db.execute('select * from gen()')),
+                         [('a', 1)])
+
+    def test_missing_columns_raises(self):
+        def gen():
+            yield (1,)
+        with self.assertRaises(ProgrammingError):
+            self.db.create_table_function(gen)
+
+    def test_iterate_exception_chains_as_cause(self):
+        def boom(n):
+            for i in range(n):
+                if i == 2:
+                    raise RuntimeError('kaboom')
+                yield (i,)
+
+        self.db.create_table_function(boom, columns=['value'])
+        with self.assertRaises(OperationalError) as cm:
+            list(self.db.execute('select value from boom(5)'))
+        self.assertIsInstance(cm.exception.__cause__, RuntimeError)
+        self.assertEqual(str(cm.exception.__cause__), 'kaboom')
+
+
 class TestRankUDFs(BaseTestCase):
     filename = ':memory:'
     test_data = (

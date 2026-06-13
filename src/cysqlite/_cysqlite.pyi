@@ -350,6 +350,19 @@ class Connection:
         deterministic: bool = ...,
     ) -> None: ...
     def create_collation(self, fn: Callable[[str, str], int] | None, name: str | None = ...) -> None: ...
+    def create_table_function(
+        self,
+        fn: Callable[..., Any],
+        name: str | None = ...,
+        columns: Sequence[str | tuple[str, str]] | None = ...,
+        params: Sequence[str] | None = ...,
+    ) -> type[TableFunction]: ...
+    def table_function(
+        self,
+        name: str | None = ...,
+        columns: Sequence[str | tuple[str, str]] | None = ...,
+        params: Sequence[str] | None = ...,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
 
     # Type system
     def register_adapter(self, python_type: type, fn: _Adapter) -> None: ...

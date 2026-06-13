@@ -43,6 +43,7 @@ from collections import namedtuple
 from random import randint
 import datetime
 import functools
+import inspect
 import io as _io
 import traceback
 import uuid
@@ -1668,6 +1669,19 @@ cdef class Connection(_callable_context_manager):
             raise ValueError('name is required when removing a collation')
         self._register('collation', fn, name or fn.__name__, 0, True)
 
+    def create_table_function(self, fn, name=None, columns=None, params=None):
+        check_connection(self)
+        cls = _build_table_function_class(fn, name, columns, params)
+        cls.register(self)
+        return cls
+
+    def table_function(self, name=None, columns=None, params=None):
+        def decorator(fn):
+            self.create_table_function(fn, name=name, columns=columns,
+                                       params=params)
+            return fn
+        return decorator
+
     cdef _register_table_function(self, table_function):
         cdef _TableFunctionImpl impl = _TableFunctionImpl(table_function, self)
         impl.create_module(self)
@@ -3171,7 +3185,7 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
     conn = _vtab_connection(pVtab)
     table_func = <object>pCur.table_func
 
-    if (idxStr == NULL or argc == 0) and table_func._nparams:
+    if idxStr == NULL and table_func._nparams:
         return SQLITE_ERROR
     elif idxStr != NULL and len(idxStr):
         params = decode(idxStr).split(',')
@@ -3240,6 +3254,7 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
         char *idxStr
         int nParams
         bytes joinedCols
+        object required
 
     if pVtab == NULL or pVtab.table_func_cls == NULL:
         return SQLITE_ERROR
@@ -3263,32 +3278,43 @@ cdef int cyBestIndex(sqlite3_vtab *pBase, sqlite3_index_info *pIdxInfo) \
         pIdxInfo.aConstraintUsage[i].argvIndex = nArg
         pIdxInfo.aConstraintUsage[i].omit = 1
 
-    if nArg > 0 or nParams == 0:
-        if nArg == nParams:
-            # All parameters are present, this is ideal.
-            pIdxInfo.estimatedCost = <double>1
-            pIdxInfo.estimatedRows = 10
-        else:
-            # Penalize the plan for each missing parameter. The cost must
-            # stay huge (so better-constrained plans always win) but also
-            # distinguishable per missing param -- subtracting from DBL_MAX
-            # does not work, as DBL_MAX - k == DBL_MAX for small k.
-            pIdxInfo.estimatedCost = 1e99 * <double>(nParams - nArg)
-            pIdxInfo.estimatedRows = 10 * (nParams - nArg)
+    # Decide whether this plan can satisfy the table function's required
+    # params. Legacy subclasses (_required_params is None) keep the "at least
+    # one param bound" rule. Generated functions declare which params lack a
+    # Python default; only those are required, so an all-defaulted function can
+    # be called with no args at all.
+    required = table_func_cls._required_params
+    if required is None:
+        if nArg == 0 and nParams != 0:
+            return SQLITE_CONSTRAINT
+    else:
+        for rp in required:
+            if rp not in columns:
+                return SQLITE_CONSTRAINT
 
-        # Store a reference to the columns in the index info structure.
-        joinedCols = encode(','.join(columns))
-        idxStr = <char *>sqlite3_malloc((len(joinedCols) + 1) * sizeof(char))
-        if idxStr == NULL:
-            return SQLITE_NOMEM
+    if nArg == nParams:
+        # All parameters are present, this is ideal.
+        pIdxInfo.estimatedCost = <double>1
+        pIdxInfo.estimatedRows = 10
+    else:
+        # Penalize the plan for each missing parameter. The cost must
+        # stay huge (so better-constrained plans always win) but also
+        # distinguishable per missing param -- subtracting from DBL_MAX
+        # does not work, as DBL_MAX - k == DBL_MAX for small k.
+        pIdxInfo.estimatedCost = 1e99 * <double>(nParams - nArg)
+        pIdxInfo.estimatedRows = 10 * (nParams - nArg)
 
-        memcpy(idxStr, <char *>joinedCols, len(joinedCols))
-        idxStr[len(joinedCols)] = b'\x00'
-        pIdxInfo.idxStr = idxStr
-        pIdxInfo.needToFreeIdxStr = 1
-        return SQLITE_OK
+    # Store a reference to the columns in the index info structure.
+    joinedCols = encode(','.join(columns))
+    idxStr = <char *>sqlite3_malloc((len(joinedCols) + 1) * sizeof(char))
+    if idxStr == NULL:
+        return SQLITE_NOMEM
 
-    return SQLITE_CONSTRAINT
+    memcpy(idxStr, <char *>joinedCols, len(joinedCols))
+    idxStr[len(joinedCols)] = b'\x00'
+    pIdxInfo.idxStr = idxStr
+    pIdxInfo.needToFreeIdxStr = 1
+    return SQLITE_OK
 
 
 # Handle INSERT / UPDATE / DELETE operations.
@@ -3433,6 +3459,7 @@ class TableFunction(object):
     print_tracebacks = False
     _ncols = 0
     _nparams = 0
+    _required_params = None
 
     @classmethod
     def register(cls, Connection conn):
@@ -3532,6 +3559,48 @@ class TableFunction(object):
                 accum.append(f'{param} HIDDEN')
 
         return ', '.join(accum)
+
+
+def _build_table_function_class(fn, name=None, columns=None, params=None):
+    name = name or getattr(fn, '__name__', None)
+    if not name:
+        raise ProgrammingError('create_table_function: a name is required')
+    if columns is None:
+        columns = getattr(fn, 'columns', None)
+    if columns is None:
+        raise ProgrammingError(
+            f'{name}: columns must be passed or set on fn.columns')
+
+    # Signature params become hidden SQL columns (in declaration order). A param
+    # without a default is required; one with a default is optional. *args /
+    # **kwargs / positional-only params are not exposed as params.
+    sig_params, required = [], []
+    for p in inspect.signature(fn).parameters.values():
+        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
+            sig_params.append(p.name)
+            if p.default is inspect.Parameter.empty:
+                required.append(p.name)
+    if params is None:
+        params = sig_params
+        req = frozenset(required)
+    else:
+        req = frozenset(p for p in required if p in params)
+
+    def initialize(self, **filters):
+        self._iter = iter(fn(**filters))        # defaults fill unbound params
+
+    def iterate(self, idx):
+        row = next(self._iter)                  # StopIteration -> end of table
+        return tuple(row) if type(row) is list else row
+
+    return type(str(name), (TableFunction,), {
+        'columns': list(columns),
+        'params': list(params),
+        'name': name,
+        '_required_params': req,
+        'initialize': initialize,
+        'iterate': iterate,
+    })
 
 
 sqlite_version = decode(sqlite3_version)

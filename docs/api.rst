@@ -1445,6 +1445,68 @@ Connection
 
          db.create_collation(collate_reverse, 'reverse')
 
+   .. method:: create_table_function(fn, name=None, columns=None, params=None)
+
+      Register a plain callable as a table-valued virtual table. This is a
+      shortcut for the full :class:`TableFunction` API: instead of writing a
+      subclass, pass a function or generator that yields rows.
+
+      *fn* is called once per query and must return an iterable of rows; each
+      row is a :class:`tuple` (or :class:`list`) with one value per column.
+      Raising / exhausting the iterator ends the table.
+
+      :param fn: the callable to expose. Its signature defines the function's
+          parameters: each becomes a hidden SQL column that may be supplied
+          positionally in the FROM clause (``fn(1, 2)``) or as a ``WHERE``
+          equality constraint. Parameters with a Python default are optional
+          in SQL and fall back to the default, while parameters without a
+          default are required. ``*args``/``**kwargs`` are not exposed.
+      :param str name: SQL name for the function. Defaults to ``fn.__name__``.
+      :param list columns: column names, or ``(name, type)`` 2-tuples. Required
+          (cysqlite declares the table schema before any row is produced, so
+          the columns cannot be inferred from the data). May instead be set as
+          a ``columns`` attribute on *fn*. Column names must not collide with
+          the parameter names.
+      :param list params: parameter names. Defaults to the names taken from
+          ``fn``'s signature; pass this only to override that.
+      :returns: the generated :class:`TableFunction` subclass.
+
+      .. code-block:: python
+
+         def series(start, stop, step=1):
+             i = start
+             while i < stop:
+                 yield (i,)
+                 i += step
+
+         db.create_table_function(series, columns=['value'])
+
+         # step falls back to its default of 1:
+         db.execute('SELECT value FROM series(0, 5)')  # 0, 1, 2, 3, 4
+         db.execute('SELECT value FROM series(0, 10, 2)')  # 0, 2, 4, 6, 8
+
+      An explicit SQL ``NULL`` for a parameter is passed to *fn* as ``None``
+      (overriding its default). Omitting the parameter uses the Python default.
+      Table functions are automatically re-registered if the connection is
+      closed and re-opened.
+
+   .. method:: table_function(name=None, columns=None, params=None)
+
+      Decorator form of :meth:`create_table_function`. Registers the decorated
+      callable on this connection and returns it unchanged (so it remains
+      usable as an ordinary function).
+
+      .. code-block:: python
+
+         @db.table_function(columns=['value'])
+         def series(start, stop, step=1):
+             i = start
+             while i < stop:
+                 yield (i,)
+                 i += step
+
+         db.execute('SELECT value FROM series(0, 10, 2)')
+
    .. method:: commit_hook(fn)
 
       Register a callback to be executed whenever a transaction is committed
@@ -2522,6 +2584,13 @@ TableFunction
 Implement a user-defined table-valued function. Unlike :meth:`Connection.create_function`
 or :meth:`Connection.create_aggregate`, which return a single scalar value, a
 table-valued function can return any number of rows of tabular data.
+
+.. note::
+   To expose a plain function or generator without writing a subclass, use the
+   :meth:`Connection.create_table_function` shortcut (or the
+   :meth:`Connection.table_function` decorator). Subclass :class:`TableFunction`
+   directly when you need writable tables, ``with_rowid``, or full control over
+   the per-query lifecycle.
 
 Example read-only :class:`TableFunction`:
 
