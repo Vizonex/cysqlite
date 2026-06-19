@@ -30,7 +30,7 @@ jobs:
     
     - name: package deps
       run: |
-          sudo apt-get install libsqlite3-dev
+          python scripts/fetch_sqlite
           pip install setuptools
           pip install .
     - name: runtests
