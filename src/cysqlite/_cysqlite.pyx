@@ -1798,16 +1798,13 @@ cdef class Connection(_callable_context_manager):
             if check_table_sizes: mode |= 0x10000
         return self.execute('pragma optimize=%d' % mode)
 
-    def attach(self, filename, name):
+    def attach(self, str filename, str name):
         check_connection(self)
-        filename = filename.replace('"', '""')
-        name = name.replace('"', '""')
-        self.execute_one(f'attach database "{filename}" as "{name}"')
+        self.execute_one('attach database ? as ?', (filename, name))
 
-    def detach(self, name):
+    def detach(self, str name):
         check_connection(self)
-        name = name.replace('"', '""')
-        self.execute_one(f'detach database "{name}"')
+        self.execute_one('detach database ?', (name,))
 
     def database_list(self):
         check_connection(self)
