@@ -12,7 +12,9 @@ from cpython.buffer cimport PyObject_CheckBuffer
 from cpython.buffer cimport PyObject_GetBuffer
 from cpython.dict cimport PyDict_GetItem
 from cpython.dict cimport PyDict_Next
+from cpython.dict cimport PyDict_Size
 from cpython.float cimport PyFloat_FromDouble
+from cpython.list cimport PyList_New
 from cpython.long cimport PyLong_FromLongLong
 from cpython.mem cimport PyMem_Free
 from cpython.mem cimport PyMem_Malloc
@@ -186,7 +188,7 @@ cdef inline unicode _quote_ident(name):
 cdef class Row(object):
     cdef:
         tuple _data
-        object _description
+        tuple _description
         dict _name_map
 
     def __cinit__(self, Cursor cursor, tuple data):
@@ -555,14 +557,19 @@ cdef class Statement(object):
 
         return result
 
-    cdef column_count(self):
+    cdef int column_count(self):
         return sqlite3_column_count(self.st)
 
     cdef list columns(self):
         cdef:
             const char *col_name
             int i, col_count = sqlite3_column_count(self.st)
-            list accum = [None] * col_count
+
+            # A Small Optimization can be made to the 
+            # column count where instead of filling None objects,
+            # we will directly alloctate needed memory instead.
+            # Previously was: [None] * col_count.
+            list accum = PyList_New(col_count)
 
         for i in range(col_count):
             col_name = sqlite3_column_name(self.st, i)
@@ -1134,7 +1141,8 @@ cdef class Connection(_callable_context_manager):
             Py_ssize_t pos = 0
 
         # Remove oldest statement from the cache.
-        if len(self.stmt_available) > self.cached_statements:
+        # It is Faster to compare against Py_ssize_t than a normal len() call. 
+        if PyDict_Size(self.stmt_available) > <Py_ssize_t>self.cached_statements:
             if PyDict_Next(self.stmt_available, &pos, &key, &value):
                 evicted = <Statement>self.stmt_available.pop(<object>key)
                 evicted.finalize()
@@ -1293,6 +1301,10 @@ cdef class Connection(_callable_context_manager):
         return [View(*row) for row in self.execute(sql, ('view',))]
 
     def get_indexes(self, table, database=None):
+        cdef:
+            Cursor stmt
+            bint is_unique
+
         database = _quote_ident(database or 'main')
         query = (f'SELECT name, sql FROM {database}.sqlite_master '
                  'WHERE tbl_name = ? AND type = ? ORDER BY name')
