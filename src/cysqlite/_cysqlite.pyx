@@ -14,7 +14,6 @@ from cpython.dict cimport PyDict_GetItem
 from cpython.dict cimport PyDict_Next
 from cpython.dict cimport PyDict_Size
 from cpython.float cimport PyFloat_FromDouble
-from cpython.list cimport PyList_New
 from cpython.long cimport PyLong_FromLongLong
 from cpython.mem cimport PyMem_Free
 from cpython.mem cimport PyMem_Malloc
@@ -188,7 +187,7 @@ cdef inline unicode _quote_ident(name):
 cdef class Row(object):
     cdef:
         tuple _data
-        tuple _description
+        object _description
         dict _name_map
 
     def __cinit__(self, Cursor cursor, tuple data):
@@ -559,22 +558,16 @@ cdef class Statement(object):
 
     cdef int column_count(self):
         return sqlite3_column_count(self.st)
+    
+    cdef object column_name(self, int i):
+        cdef const char* col_name = sqlite3_column_name(self.st, i)
+        return PyUnicode_FromString(col_name) if col_name != NULL else None
 
     cdef list columns(self):
         cdef:
             const char *col_name
             int i, col_count = sqlite3_column_count(self.st)
-
-            # A Small Optimization can be made to the 
-            # column count where instead of filling None objects,
-            # we will directly alloctate needed memory instead.
-            # Previously was: [None] * col_count.
-            list accum = PyList_New(col_count)
-
-        for i in range(col_count):
-            col_name = sqlite3_column_name(self.st, i)
-            col = PyUnicode_FromString(col_name) if col_name != NULL else None
-            accum[i] = col
+            list accum = [self.column_name(i) for i in range(col_count)]
         return accum
 
 
