@@ -285,6 +285,7 @@ def dict_factory(Cursor cursor, tuple row):
     return {d[0]: v for d, v in zip(cursor.description, row)}
 
 
+@cython.final
 @cython.internal
 cdef class Statement(object):
     cdef:
