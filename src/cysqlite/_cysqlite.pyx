@@ -899,6 +899,7 @@ cdef class Connection(_callable_context_manager):
         dict converters  # SQLite decltype -> converter(value).
         dict adapters  # Python type -> adapter(value).
         dict registrations  # (name, nargs, kind) -> (kind, fn, name, nargs...)
+        dict callbacks  # (name, nargs, kind) -> wrapper; see _Callback.
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # In-use Statements, keyed by identity.
         object blob_in_use  # id(blob) -> Blob.
@@ -927,6 +928,7 @@ cdef class Connection(_callable_context_manager):
 
         self.db = NULL
         self.registrations = {}
+        self.callbacks = {}
         self.stmt_available = {}
         self.stmt_in_use = {}
         self.blob_in_use = weakref.WeakValueDictionary()
@@ -1008,15 +1010,16 @@ cdef class Connection(_callable_context_manager):
         # Clear last error.
         self._callback_error = None
 
-        # UDFs, stored in `registrations`, are owned by SQLite so their
-        # xDestroy CB will free the refs. We retain the refs in order to replay
-        # them on re-connect.
-
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
             raise InternalError(f'error closing database: {rc}')
 
         self.db = NULL
+
+        # The closed handle no longer references the UDF/table-function
+        # wrappers, so release them. `registrations` is retained in order to
+        # replay them on re-connect.
+        self.callbacks.clear()
         return True
 
     def connect(self):
@@ -1551,9 +1554,10 @@ cdef class Connection(_callable_context_manager):
             raise OperationalError(f'error loading extension: {msg}')
 
     cdef _register(self, kind, fn, name, nargs, deterministic):
-        # Register user-defined scalar/aggregate/window/collation, and hand
-        # ownership of the `_Callback` to SQLite. A fn of None removes the
-        # matching registration.
+        # Register a user-defined scalar/aggregate/window/collation; a fn of
+        # None removes the matching registration. The wrapper is owned by
+        # self.callbacks and only borrowed by SQLite -- the ownership model
+        # and the rules for dropping references are documented on _Callback.
         check_connection(self)
         cdef:
             _Callback callback
@@ -1569,24 +1573,27 @@ cdef class Connection(_callable_context_manager):
                 rc = sqlite3_create_collation_v2(
                     self.db, <const char *>bname, SQLITE_UTF8, NULL, NULL,
                     NULL)
-                self.registrations.pop((name, nargs, kind), None)
+                kinds = ('collation',)
             else:
                 # Scalar, aggregate and window functions share a registry, so
                 # an all-NULL registration removes whichever kind matches.
                 rc = sqlite3_create_function_v2(
                     self.db, bname, <int>nargs, flags, NULL, NULL, NULL, NULL,
                     NULL)
-                for k in ('function', 'aggregate', 'window'):
-                    self.registrations.pop((name, nargs, k), None)
+                kinds = ('function', 'aggregate', 'window')
             if rc != SQLITE_OK:
+                # E.g. SQLITE_BUSY when the function is in active use. SQLite
+                # kept the old registration, so keep our references too.
                 raise_sqlite_error(self, 'error removing %s: ' % kind)
+            for k in kinds:
+                self.registrations.pop((name, nargs, k), None)
+                self.callbacks.pop((name, nargs, k), None)
             return
 
         if deterministic:
             flags |= SQLITE_DETERMINISTIC
 
         callback = _Callback.__new__(_Callback, self, fn)
-        Py_INCREF(callback)  # Matching decref in _free_cb.
 
         if kind == 'function':
             rc = sqlite3_create_function_v2(
@@ -1598,7 +1605,7 @@ cdef class Connection(_callable_context_manager):
                 _function_cb,
                 NULL,
                 NULL,
-                _free_cb)
+                NULL)
         elif kind == 'aggregate':
             rc = sqlite3_create_function_v2(
                 self.db,
@@ -1609,7 +1616,7 @@ cdef class Connection(_callable_context_manager):
                 NULL,
                 _step_cb,
                 _finalize_cb,
-                _free_cb)
+                NULL)
         elif kind == 'window':
             rc = sqlite3_create_window_function(
                 self.db,
@@ -1621,7 +1628,7 @@ cdef class Connection(_callable_context_manager):
                 _finalize_cb,
                 _value_cb,
                 _inverse_cb,
-                _free_cb)
+                NULL)
         elif kind == 'collation':
             rc = sqlite3_create_collation_v2(
                 self.db,
@@ -1629,15 +1636,14 @@ cdef class Connection(_callable_context_manager):
                 SQLITE_UTF8,
                 <void *>callback,
                 _collation_cb,
-                _free_cb)
+                NULL)
 
         if rc != SQLITE_OK:
-            # SQLite invokes xDestroy on failure for the function APIs, but
-            # explicitly does not for sqlite3_create_collation_v2.
-            if kind == 'collation':
-                Py_DECREF(callback)
             raise_sqlite_error(self, 'error creating %s: ' % kind)
 
+        # Success: SQLite released any wrapper this replaced, and ours is now
+        # the one it borrows (a failed registration must not reach here).
+        self.callbacks[(name, nargs, kind)] = callback
         self.registrations[(name, nargs, kind)] = (
             kind,
             fn,
@@ -1686,6 +1692,9 @@ cdef class Connection(_callable_context_manager):
     cdef _register_table_function(self, table_function):
         cdef _TableFunctionImpl impl = _TableFunctionImpl(table_function, self)
         impl.create_module(self)
+        # The impl is owned here and only borrowed by SQLite, like every
+        # other callback wrapper (see _Callback).
+        self.callbacks[(impl.name, 0, 'tablefunc')] = impl
         self.registrations[(impl.name, 0, 'tablefunc')] = (
             'tablefunc', table_function, impl.name, 0, False)
 
@@ -1924,6 +1933,23 @@ cdef class Connection(_callable_context_manager):
 
 
 cdef class _Callback(object):
+    # Wrapper handed to SQLite (as the user-data / context pointer) for every
+    # registered hook, UDF and collation; it references the Connection so
+    # callbacks can stash errors on it (_callback_error).
+    #
+    # Ownership model: the Connection owns every wrapper it hands to SQLite
+    # -- hooks via the _commit_hook/_trace_hook/... attributes, UDFs and
+    # collations via the `callbacks` dict (_TableFunctionImpl follows the
+    # same model). SQLite only *borrows* the pointer: nothing is INCREF'd on
+    # its behalf and no xDestroy destructor is registered. If SQLite owned
+    # the only reference, the conn <-> wrapper cycle would be invisible to
+    # the cyclic GC and an unclosed Connection could never be collected.
+    #
+    # Invariant: a wrapper reference may only be dropped (attribute cleared,
+    # dict entry popped or overwritten) once SQLite can no longer use the
+    # pointer: after a *successful* re-registration or removal (SQLite
+    # refuses both with SQLITE_BUSY while the object is in active use), or
+    # after sqlite3_close_v2() has succeeded.
     cdef:
         Connection conn
         object fn
@@ -1933,10 +1959,6 @@ cdef class _Callback(object):
         self.conn = conn
         self.fn = fn
         self.settings = settings
-
-cdef void _free_cb(void *p) noexcept with gil:
-    if p != NULL:
-        Py_DECREF(<_Callback>p)
 
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
@@ -2834,8 +2856,10 @@ _io.RawIOBase.register(Blob)
 
 # The cysqlite_vtab struct embeds the base sqlite3_vtab struct, and adds a
 # field to store a reference to the Python implementation and a borrowed ptr to
-# the parent Connection. The module (and the _TableFunctionImpl that owns the
-# connection ref) outlives every vtab created from it.
+# the parent Connection. The vtab holds its own reference on the
+# TableFunction subclass (INCREF in cyConnect, DECREF in cyDisconnect); the
+# conn ptr is only dereferenced from callbacks that run during statement
+# execution, which requires a live Connection.
 ctypedef struct cysqlite_vtab:
     sqlite3_vtab base
     void *table_func_cls
@@ -2861,9 +2885,9 @@ cdef void set_vtab_error(sqlite3_vtab *pVtab, const char *msg) noexcept:
 
 
 cdef inline Connection _vtab_connection(cysqlite_vtab *pVtab):
-    # Return the owning Conn from a vtab. The Connection is held alive via the
-    # _TableFunctionImpl, whose lifetime is bound to the module registration on
-    # the conn, so the ptr is either valid or NULL.
+    # Return the owning Conn from a vtab. Callers only run while a statement
+    # is executing on the connection, so the borrowed ptr is either valid or
+    # NULL.
     if pVtab == NULL or pVtab.conn == NULL:
         return None
     return <Connection>pVtab.conn
@@ -3367,13 +3391,32 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
     return SQLITE_OK
 
 
-cdef void cyDestroy(void *pAux) noexcept with gil:
-    Py_DECREF(<_TableFunctionImpl>pAux)
+# All table functions share one static module definition: the function
+# pointers are identical for every registration, and per-function state (the
+# TableFunction subclass and owning connection) travels through the pAux
+# pointer given to sqlite3_create_module_v2(). A C global also guarantees the
+# struct outlives every registration that refers to it -- SQLite dereferences
+# it as late as connection teardown (clearing eponymous vtabs). Members not
+# assigned below (xCreate, xBegin, xRename, ...) stay NULL from static
+# initialization; xCreate in particular must remain NULL so the function can
+# be invoked eponymously.
+cdef sqlite3_module _tablefunc_module
+_tablefunc_module.iVersion = 0
+_tablefunc_module.xConnect = cyConnect
+_tablefunc_module.xBestIndex = cyBestIndex
+_tablefunc_module.xDisconnect = cyDisconnect
+_tablefunc_module.xOpen = cyOpen
+_tablefunc_module.xClose = cyClose
+_tablefunc_module.xFilter = cyFilter
+_tablefunc_module.xNext = cyNext
+_tablefunc_module.xEof = cyEof
+_tablefunc_module.xColumn = cyColumn
+_tablefunc_module.xRowid = cyRowid
+_tablefunc_module.xUpdate = cyUpdate
 
 
 cdef class _TableFunctionImpl(object):
     cdef:
-        sqlite3_module module
         object table_function
         Connection conn
         unicode name  # Resolved during class-construction.
@@ -3388,41 +3431,18 @@ cdef class _TableFunctionImpl(object):
 
         cdef:
             bytes name = encode(self.name)
-            sqlite3 *db = conn.db
             int rc
 
-        # Populate the SQLite module struct members.
-        self.module.iVersion = 0
-        self.module.xCreate = NULL
-        self.module.xConnect = cyConnect
-        self.module.xBestIndex = cyBestIndex
-        self.module.xDisconnect = cyDisconnect
-        self.module.xDestroy = NULL
-        self.module.xOpen = cyOpen
-        self.module.xClose = cyClose
-        self.module.xFilter = cyFilter
-        self.module.xNext = cyNext
-        self.module.xEof = cyEof
-        self.module.xColumn = cyColumn
-        self.module.xRowid = cyRowid
-        self.module.xUpdate = cyUpdate
-        self.module.xBegin = NULL
-        self.module.xSync = NULL
-        self.module.xCommit = NULL
-        self.module.xRollback = NULL
-        self.module.xFindFunction = NULL
-        self.module.xRename = NULL
-
-        # Increment refcount before handing ptr to SQLite.
-        Py_INCREF(self)
+        # No destructor: the impl is owned by the connection's `callbacks`
+        # dict (see _Callback) and outlives the module registration that
+        # borrows it.
         rc = sqlite3_create_module_v2(
-            db,
+            conn.db,
             <const char *>name,
-            &self.module,
+            &_tablefunc_module,
             <void *>self,
-            cyDestroy)
+            NULL)
         if rc != SQLITE_OK:
-            Py_DECREF(self)
             raise_sqlite_error(
                 conn,
                 'failed to register table function %s: ' % self.name)
