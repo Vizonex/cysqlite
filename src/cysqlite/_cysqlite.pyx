@@ -23,7 +23,6 @@ from cpython.tuple cimport PyTuple_New
 from cpython.tuple cimport PyTuple_GET_SIZE
 from cpython.tuple cimport PyTuple_SET_ITEM
 from cpython.unicode cimport PyUnicode_AsUTF8
-from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.unicode cimport PyUnicode_AsUTF8AndSize
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 from cpython.unicode cimport PyUnicode_FromString
@@ -31,16 +30,10 @@ from libc.limits cimport INT_MAX
 from libc.math cimport log
 from libc.math cimport sqrt
 from libc.stdint cimport int64_t
-from libc.stdint cimport uint32_t
-from libc.stdint cimport uintptr_t
-from libc.stdlib cimport free
-from libc.stdlib cimport malloc
 from libc.stdlib cimport rand
 from libc.string cimport memcpy
 from libc.string cimport memset
 
-from collections import namedtuple
-from random import randint
 import datetime
 import functools
 import inspect
@@ -379,7 +372,7 @@ cdef class Statement(object):
             Py_ssize_t nbytes
             Py_buffer view
             bint adapt = bool(self.conn.adapters)
-            int i = 1, rc = 0
+            int i, rc = 0
             int pc
             tuple tparams
 
@@ -1181,18 +1174,15 @@ cdef class Connection(_callable_context_manager):
             void *userdata = NULL
 
         if callback is not None:
-            Py_INCREF(ctx)
+            # sqlite3_exec is synchronous; the `ctx` local keeps the tuple
+            # alive for the duration of the call.
             userdata = <void *>ctx
 
-        try:
-            rc = sqlite3_exec(self.db, bsql, _exec_callback, userdata, &errmsg)
-            if rc != SQLITE_OK:
-                if errmsg != NULL:
-                    sqlite3_free(errmsg)
-                raise_sqlite_error(self, 'error executing query: ')
-        finally:
-            if callback is not None:
-                Py_DECREF(ctx)
+        rc = sqlite3_exec(self.db, bsql, _exec_callback, userdata, &errmsg)
+        if rc != SQLITE_OK:
+            if errmsg != NULL:
+                sqlite3_free(errmsg)
+            raise_sqlite_error(self, 'error executing query: ')
 
     cdef _execute_internal(self, sql):
         # Internal helper for executing BEGIN/COMMIT/ROLLBACK to avoid
@@ -1593,7 +1583,7 @@ cdef class Connection(_callable_context_manager):
         if deterministic:
             flags |= SQLITE_DETERMINISTIC
 
-        callback = _Callback.__new__(_Callback, self, fn)
+        callback = _Callback(self, fn)
 
         if kind == 'function':
             rc = sqlite3_create_function_v2(
@@ -1705,7 +1695,7 @@ cdef class Connection(_callable_context_manager):
             sqlite3_commit_hook(self.db, NULL, NULL)
             return
 
-        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        cdef _Callback callback = _Callback(self, fn)
         self._commit_hook = callback
         sqlite3_commit_hook(self.db, _commit_cb, <void *>callback)
 
@@ -1715,7 +1705,7 @@ cdef class Connection(_callable_context_manager):
             self._rollback_hook = None
             sqlite3_rollback_hook(self.db, NULL, NULL)
             return
-        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        cdef _Callback callback = _Callback(self, fn)
         self._rollback_hook = callback
         sqlite3_rollback_hook(self.db, _rollback_cb, <void *>callback)
 
@@ -1726,7 +1716,7 @@ cdef class Connection(_callable_context_manager):
             sqlite3_update_hook(self.db, NULL, NULL)
             return
 
-        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        cdef _Callback callback = _Callback(self, fn)
         self._update_hook = callback
         sqlite3_update_hook(self.db, _update_cb, <void *>callback)
 
@@ -1740,7 +1730,7 @@ cdef class Connection(_callable_context_manager):
             self._auth_hook = None
             rc = sqlite3_set_authorizer(self.db, NULL, NULL)
         else:
-            callback = _Callback.__new__(_Callback, self, fn)
+            callback = _Callback(self, fn)
             self._auth_hook = callback
             rc = sqlite3_set_authorizer(self.db, _auth_cb, <void *>callback)
 
@@ -1774,7 +1764,7 @@ cdef class Connection(_callable_context_manager):
             self._progress_hook = None
             sqlite3_progress_handler(self.db, 0, NULL, NULL)
         else:
-            callback = _Callback.__new__(_Callback, self, fn)
+            callback = _Callback(self, fn)
             self._progress_hook = callback
             sqlite3_progress_handler(self.db, n, _progress_cb,
                                      <void *>callback)
@@ -2305,7 +2295,6 @@ cdef int _progress_cb(void *data) noexcept with gil:
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) noexcept with gil:
     cdef:
-        bytes bcol
         int i
         object callback
 
@@ -3049,7 +3038,7 @@ cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
         tuple row
         tuple tmp
         int ncols = table_func._ncols
-        bint with_rowid = getattr(type(table_func), 'with_rowid', False)
+        bint with_rowid = table_func.with_rowid
 
     if raw is None:
         pCur.stopped = True
