@@ -1490,6 +1490,10 @@ Connection
       Table functions are automatically re-registered if the connection is
       closed and re-opened.
 
+      To build the subclass without registering it -- e.g. to register the
+      same function on several connections -- use
+      :meth:`TableFunction.from_function`.
+
    .. method:: table_function(name=None, columns=None, params=None)
 
       Decorator form of :meth:`create_table_function`. Registers the decorated
@@ -2878,6 +2882,20 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
       Handle DELETE of a row in the virtual table.
 
       If omitted, the virtual table will not support DELETE queries.
+
+   .. classmethod:: from_function(fn, name=None, columns=None, params=None)
+
+       :param fn: callable returning an iterable of row tuples.
+       :param str name: SQL name for the function, defaults to ``fn.__name__``.
+       :param list columns: column names, or ``(name, type)`` 2-tuples.
+       :param list params: parameter names, defaults to ``fn``'s signature.
+       :returns: a new :class:`TableFunction` subclass wrapping *fn*.
+
+       Build a table function from a plain callable without registering it.
+       :meth:`Connection.create_table_function` is this plus
+       :meth:`~TableFunction.register` -- see it for the full parameter
+       semantics. Use ``from_function`` directly to register the same
+       function on more than one connection.
 
    .. classmethod:: register(conn)
 

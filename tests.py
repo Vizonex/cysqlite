@@ -4555,6 +4555,32 @@ class TestCreateTableFunction(BaseTestCase):
         self.assertIsInstance(cm.exception.__cause__, RuntimeError)
         self.assertEqual(str(cm.exception.__cause__), 'kaboom')
 
+    def test_from_function_registers_per_connection(self):
+        def series(start, stop, step=1):
+            i = start
+            while i < stop:
+                yield (i,)
+                i += step
+
+        # Built without any connection; register on two independently.
+        cls = TableFunction.from_function(series, columns=['value'])
+        self.assertTrue(issubclass(cls, TableFunction))
+        self.assertEqual((cls.name, cls.params), ('series',
+                                                  ['start', 'stop', 'step']))
+
+        cls.register(self.db)
+        self.assertEqual(self.values('select value from series(0, 3)'),
+                         [0, 1, 2])
+
+        db2 = Connection(':memory:')
+        try:
+            cls.register(db2)
+            self.assertEqual(
+                [r for r, in db2.execute('select value from series(2, 5)')],
+                [2, 3, 4])
+        finally:
+            db2.close()
+
 
 class TestRankUDFs(BaseTestCase):
     filename = ':memory:'

@@ -1668,7 +1668,7 @@ cdef class Connection(_callable_context_manager):
 
     def create_table_function(self, fn, name=None, columns=None, params=None):
         check_connection(self)
-        cls = _build_table_function_class(fn, name, columns, params)
+        cls = TableFunction.from_function(fn, name, columns, params)
         cls.register(self)
         return cls
 
@@ -3476,6 +3476,55 @@ class TableFunction(object):
         # Stored in conn.registrations so it is replayed on reconnect.
         conn._register_table_function(cls)
 
+    @classmethod
+    def from_function(cls, fn, name=None, columns=None, params=None):
+        """
+        Build a subclass of ``cls`` from a plain callable, without
+        registering it on a connection. Connection.create_table_function()
+        is this plus register(); use this directly to register the same
+        function on more than one connection.
+        """
+        name = name or getattr(fn, '__name__', None)
+        if not name:
+            raise ProgrammingError('table function requires a name')
+        if columns is None:
+            columns = getattr(fn, 'columns', None)
+        if columns is None:
+            raise ProgrammingError(
+                f'{name}: columns must be passed or set on fn.columns')
+
+        # Signature params become hidden SQL columns (in declaration order).
+        # A param without a default is required; one with a default is
+        # optional. *args / **kwargs / positional-only params are not exposed
+        # as params.
+        sig_params, required = [], []
+        for p in inspect.signature(fn).parameters.values():
+            if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
+                sig_params.append(p.name)
+                if p.default is inspect.Parameter.empty:
+                    required.append(p.name)
+        if params is None:
+            params = sig_params
+            req = frozenset(required)
+        else:
+            req = frozenset(p for p in required if p in params)
+
+        def initialize(self, **filters):
+            self._iter = iter(fn(**filters))    # defaults fill unbound params
+
+        def iterate(self, idx):
+            row = next(self._iter)              # StopIteration -> end of table
+            return tuple(row) if type(row) is list else row
+
+        return type(str(name), (cls,), {
+            'columns': list(columns),
+            'params': list(params),
+            'name': name,
+            '_required_params': req,
+            'initialize': initialize,
+            'iterate': iterate,
+        })
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if cls.columns is not None:
@@ -3566,48 +3615,6 @@ class TableFunction(object):
                 accum.append(f'{param} HIDDEN')
 
         return ', '.join(accum)
-
-
-def _build_table_function_class(fn, name=None, columns=None, params=None):
-    name = name or getattr(fn, '__name__', None)
-    if not name:
-        raise ProgrammingError('create_table_function: a name is required')
-    if columns is None:
-        columns = getattr(fn, 'columns', None)
-    if columns is None:
-        raise ProgrammingError(
-            f'{name}: columns must be passed or set on fn.columns')
-
-    # Signature params become hidden SQL columns (in declaration order). A param
-    # without a default is required; one with a default is optional. *args /
-    # **kwargs / positional-only params are not exposed as params.
-    sig_params, required = [], []
-    for p in inspect.signature(fn).parameters.values():
-        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
-            sig_params.append(p.name)
-            if p.default is inspect.Parameter.empty:
-                required.append(p.name)
-    if params is None:
-        params = sig_params
-        req = frozenset(required)
-    else:
-        req = frozenset(p for p in required if p in params)
-
-    def initialize(self, **filters):
-        self._iter = iter(fn(**filters))        # defaults fill unbound params
-
-    def iterate(self, idx):
-        row = next(self._iter)                  # StopIteration -> end of table
-        return tuple(row) if type(row) is list else row
-
-    return type(str(name), (TableFunction,), {
-        'columns': list(columns),
-        'params': list(params),
-        'name': name,
-        '_required_params': req,
-        'initialize': initialize,
-        'iterate': iterate,
-    })
 
 
 sqlite_version = decode(sqlite3_version)
