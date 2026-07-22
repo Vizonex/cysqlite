@@ -35,7 +35,7 @@ Module
       internally and is not mutated by the connection.
    :param str journal_mode: Convenience shorthand for setting the
       ``journal_mode`` pragma at connect time, e.g. ``'wal'``. Equivalent to
-      including ``'journal_mode'`` in *pragmas*; an explicit entry in
+      including ``'journal_mode'`` in *pragmas*. An explicit entry in
       *pragmas* takes precedence.
    :return: Connection to database.
    :rtype: :class:`Connection`
@@ -132,7 +132,7 @@ Connection
       internally and is not mutated by the connection.
    :param str journal_mode: Convenience shorthand for setting the
       ``journal_mode`` pragma at connect time, e.g. ``'wal'``. Equivalent to
-      including ``'journal_mode'`` in *pragmas*; an explicit entry in
+      including ``'journal_mode'`` in *pragmas*. An explicit entry in
       *pragmas* takes precedence.
 
    Default flags are ``SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE``. If ``uri``
@@ -478,8 +478,8 @@ Connection
 
       Unlike :mod:`sqlite3`, this method does **not** issue an implicit
       ``COMMIT`` before executing. If called inside an :meth:`atomic` or
-      :meth:`transaction` block the script runs within that transaction;
-      if called in autocommit mode each statement commits individually.
+      :meth:`transaction` block the script runs within that transaction.
+      If called in autocommit mode each statement commits individually.
       To run a script as a single atomic unit, wrap it explicitly:
 
       .. code-block:: python
@@ -1451,7 +1451,7 @@ Connection
       shortcut for the full :class:`TableFunction` API: instead of writing a
       subclass, pass a function or generator that yields rows.
 
-      *fn* is called once per query and must return an iterable of rows; each
+      *fn* is called once per query and must return an iterable of rows. Each
       row is a :class:`tuple` (or :class:`list`) with one value per column.
       Raising / exhausting the iterator ends the table.
 
@@ -1468,7 +1468,7 @@ Connection
           a ``columns`` attribute on *fn*. Column names must not collide with
           the parameter names.
       :param list params: parameter names. Defaults to the names taken from
-          ``fn``'s signature; pass this only to override that.
+          ``fn``'s signature. Use this parameter to override.
       :returns: the generated :class:`TableFunction` subclass.
 
       .. code-block:: python
@@ -1695,7 +1695,7 @@ Connection
 
       An exception raised by the callback does not interrupt the operation.
       The exception is recorded on :attr:`~Connection.callback_error` and the
-      query proceeds; return a non-zero value to interrupt.
+      query proceeds. Return a non-zero value to interrupt.
 
       Example:
 
@@ -2231,7 +2231,7 @@ Cursor
       affected-row count only after the cursor has been fully drained (via
       :meth:`fetchall`, iteration to completion, or exhausting
       :meth:`fetchmany`). Reading ``rowcount`` mid-iteration is safe but may
-      report a partial count; the exact pre-drain value depends on the SQLite
+      report a partial count. The exact pre-drain value depends on the SQLite
       query plan and should not be relied on.
 
    .. method:: __enter__()

@@ -10,8 +10,7 @@ Everything below is registered on a :class:`Connection`. The SQL functions and
 collations are automatically re-registered if the connection is closed and
 re-opened.
 
-This page is a quick tour; see the :class:`Connection` methods in the
-:doc:`api` reference for the full signatures and options.
+See the :class:`Connection` methods in the :doc:`api` reference for details.
 
 Scalar functions
 ----------------
@@ -83,7 +82,7 @@ Table-valued functions
 ----------------------
 
 Expose a generator (or any function returning an iterable of rows) as a table.
-Each signature parameter becomes a function argument; parameters with a default
+Each signature parameter becomes a function argument and parameters with a default
 are optional. The :meth:`Connection.table_function` decorator registers the
 function and returns it unchanged:
 
