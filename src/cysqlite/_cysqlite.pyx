@@ -41,6 +41,8 @@ import io as _io
 import traceback
 import uuid
 import weakref
+from bisect import bisect_left
+from bisect import insort
 
 from cysqlite._cysqlite cimport *
 from cysqlite.exceptions import (
@@ -612,14 +614,18 @@ cdef class Cursor(object):
 
         self.description = tuple(description)
 
-    cpdef execute(self, sql, params=None):
+    cdef int _start_execute(self) except -1:
         if self.conn.db == NULL:
             self.stmt = None
             self.executing = False
-            raise OperationalError('Database is closed.')
+            raise OperationalError('Cannot operate on closed database.')
 
         if self.executing:
             self.finish()
+        return 0
+
+    cpdef execute(self, sql, params=None):
+        self._start_execute()
 
         self.description = None
         self.row_converters = None
@@ -666,13 +672,7 @@ cdef class Cursor(object):
         return self
 
     cpdef executemany(self, sql, seq_of_params=None):
-        if self.conn.db == NULL:
-            self.stmt = None
-            self.executing = False
-            raise OperationalError('Database is closed.')
-
-        if self.executing:
-            self.finish()
+        self._start_execute()
 
         self.description = None
         self.row_converters = None
@@ -714,13 +714,7 @@ cdef class Cursor(object):
         return self
 
     cpdef executescript(self, sql):
-        if self.conn.db == NULL:
-            self.stmt = None
-            self.executing = False
-            raise OperationalError('Database is closed.')
-
-        if self.executing:
-            self.finish()
+        self._start_execute()
 
         cdef:
             sqlite3_stmt *st
@@ -774,7 +768,7 @@ cdef class Cursor(object):
     cdef tuple _get_current_row(self):
         if self.conn.db == NULL:
             self.executing = False
-            raise OperationalError('Database was closed.')
+            raise OperationalError('Cannot operate on closed database.')
         elif self.stmt and self.stmt.st == NULL:
             self.executing = False
             raise OperationalError('Statement was finalized.')
@@ -932,13 +926,18 @@ cdef class Connection(_callable_context_manager):
 
     def __dealloc__(self):
         if self.db:
-            sqlite3_trace_v2(self.db, 0, NULL, NULL)
-            sqlite3_commit_hook(self.db, NULL, NULL)
-            sqlite3_rollback_hook(self.db, NULL, NULL)
-            sqlite3_update_hook(self.db, NULL, NULL)
-            sqlite3_set_authorizer(self.db, NULL, NULL)
-            sqlite3_progress_handler(self.db, 0, NULL, NULL)
+            self._clear_hooks()
             sqlite3_close_v2(self.db)
+
+    cdef _clear_hooks(self):
+        # Unregistering is a no-op when nothing is registered, so these run
+        # unconditionally.
+        sqlite3_trace_v2(self.db, 0, NULL, NULL)
+        sqlite3_commit_hook(self.db, NULL, NULL)
+        sqlite3_rollback_hook(self.db, NULL, NULL)
+        sqlite3_update_hook(self.db, NULL, NULL)
+        sqlite3_set_authorizer(self.db, NULL, NULL)
+        sqlite3_progress_handler(self.db, 0, NULL, NULL)
 
     def finalize_statements(self):
         cdef Statement stmt
@@ -967,29 +966,11 @@ cdef class Connection(_callable_context_manager):
                 raise OperationalError('cannot close database while a '
                                        'transaction is open.')
 
-        if self._trace_hook is not None:
-            sqlite3_trace_v2(self.db, 0, NULL, NULL)
-            self._trace_hook = None
-
-        if self._commit_hook is not None:
-            sqlite3_commit_hook(self.db, NULL, NULL)
-            self._commit_hook = None
-
-        if self._rollback_hook is not None:
-            sqlite3_rollback_hook(self.db, NULL, NULL)
-            self._rollback_hook = None
-
-        if self._update_hook is not None:
-            sqlite3_update_hook(self.db, NULL, NULL)
-            self._update_hook = None
-
-        if self._auth_hook is not None:
-            sqlite3_set_authorizer(self.db, NULL, NULL)
-            self._auth_hook = None
-
-        if self._progress_hook is not None:
-            sqlite3_progress_handler(self.db, 0, NULL, NULL)
-            self._progress_hook = None
+        # Now that the hooks are unregistered SQLite cannot reach the wrappers,
+        # so our references can be dropped. See _Callback.
+        self._clear_hooks()
+        self._trace_hook = self._commit_hook = self._rollback_hook = None
+        self._update_hook = self._auth_hook = self._progress_hook = None
 
         # Close all blobs.
         for blob in list(self.blob_in_use.values()):
@@ -1139,28 +1120,24 @@ cdef class Connection(_callable_context_manager):
     def cursor(self):
         return Cursor(self)
 
+    # The Cursor methods below check the connection is open, no need to here.
     def execute(self, sql, params=None):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.execute(sql, params)
 
     def executemany(self, sql, seq_of_params):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.executemany(sql, seq_of_params)
 
     def executescript(self, sql):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.executescript(sql)
 
     def execute_one(self, sql, params=None):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.execute(sql, params).fetchone()
 
     def execute_scalar(self, sql, params=None):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.execute(sql, params).scalar()
 
@@ -1950,6 +1927,15 @@ cdef class _Callback(object):
         self.fn = fn
         self.settings = settings
 
+
+cdef inline void _capture_exc(Connection conn, object exc) noexcept:
+    # Stash the exception on the connection so raise_sqlite_error can chain it
+    # as __cause__ on the error reported to the caller.
+    conn._callback_error = exc
+    if conn.print_callback_tracebacks:
+        traceback.print_exc()
+
+
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
         _Callback cb = <_Callback>sqlite3_user_data(ctx)
@@ -1963,9 +1949,7 @@ cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noe
         result = cb.fn(*params)
         python_to_sqlite(ctx, result)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined function', -1)
 
 
@@ -1999,9 +1983,7 @@ cdef _AggregateWrapper get_aggregate(sqlite3_context *ctx):
     try:
         aggregate = cb.fn()  # Create aggregate instance.
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
         return
 
@@ -2027,9 +2009,7 @@ cdef void _step_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcep
         params = sqlite_to_python(argc, argv)
         wrapper.aggregate.step(*params)
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
 
 
@@ -2045,9 +2025,7 @@ cdef void _finalize_cb(sqlite3_context *ctx) noexcept with gil:
         result = wrapper.aggregate.finalize()
         python_to_sqlite(ctx, result)
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
 
     Py_DECREF(wrapper)  # Match incref.
@@ -2068,9 +2046,7 @@ cdef void _value_cb(sqlite3_context *ctx) noexcept with gil:
         result = wrapper.aggregate.value()
         python_to_sqlite(ctx, result)
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined window function', -1)
 
 
@@ -2086,9 +2062,7 @@ cdef void _inverse_cb(sqlite3_context *ctx, int argc, sqlite3_value **params) no
     try:
         wrapper.aggregate.inverse(*sqlite_to_python(argc, params))
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined window function', -1)
 
 
@@ -2106,9 +2080,7 @@ cdef int _collation_cb(void *data, int n1, const void *data1,
     try:
         result = cb.fn(str1, str2)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         return 0
 
     if result > 0:
@@ -2128,9 +2100,7 @@ cdef int _commit_cb(void *data) noexcept with gil:
         if cb.fn():
             return SQLITE_ERROR
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -2143,9 +2113,7 @@ cdef void _rollback_cb(void *data) noexcept with gil:
     try:
         cb.fn()
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
 
 
 cdef void _update_cb(void *data, int queryType, const char *database,
@@ -2168,9 +2136,7 @@ cdef void _update_cb(void *data, int queryType, const char *database,
     try:
         cb.fn(query, decode(database), decode(table), <long long>rowid)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
 
 
 cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
@@ -2228,9 +2194,7 @@ cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
     try:
         rc = cb.fn(op, s1, s2, s3, s4)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         rc = SQLITE_ERROR
     return rc
 
@@ -2271,9 +2235,7 @@ cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with g
     try:
         cb.fn(event, sid, sql, ns)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         # NOTE: Sqlite ignores non-zero return values but this may change in
         # the future. Currently they advise returning 0.
         # return SQLITE_ERROR
@@ -2287,9 +2249,7 @@ cdef int _progress_cb(void *data) noexcept with gil:
     try:
         return 1 if cb.fn() else 0
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         return SQLITE_OK
 
 
@@ -2308,9 +2268,7 @@ cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) noex
     try:
         callback(row)
     except Exception as exc:
-        conn._callback_error = exc
-        if conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(conn, exc)
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -2440,9 +2398,17 @@ cdef class Atomic(_callable_context_manager):
 cdef inline int _check_blob(Blob blob) except -1:
     if blob.blob == NULL:
         raise ValueError('Cannot operate on closed blob.')
-    if blob.conn.db == NULL:
-        raise OperationalError('Database closed.')
+    check_connection(blob.conn)
     return 0
+
+
+cdef inline bytes _blob_read(Blob blob, int length, int offset):
+    # A failed read closes the handle, leaving the blob unusable.
+    cdef bytes buf = PyBytes_FromStringAndSize(NULL, length)
+    if sqlite3_blob_read(blob.blob, PyBytes_AS_STRING(buf), length, offset):
+        blob._close()
+        raise_sqlite_error(blob.conn, 'error reading from blob: ')
+    return buf
 
 
 cdef class Blob(object):
@@ -2463,8 +2429,7 @@ cdef class Blob(object):
             int rc
             sqlite3_blob *blob
 
-        if conn.db == NULL:
-            raise OperationalError('cannot operate on closed database.')
+        check_connection(conn)
 
         self.conn = conn
         self._read_only = read_only
@@ -2570,11 +2535,8 @@ cdef class Blob(object):
         if limit == 0:
             return b''
 
-        chunk = PyBytes_FromStringAndSize(NULL, limit)
+        chunk = _blob_read(self, limit, self.offset)
         p = PyBytes_AS_STRING(chunk)
-        if sqlite3_blob_read(self.blob, p, limit, self.offset):
-            self._close()
-            raise_sqlite_error(self.conn, 'error reading from blob: ')
 
         n_read = limit
         for i in range(limit):
@@ -2618,7 +2580,6 @@ cdef class Blob(object):
             int length
             int blob_size = sqlite3_blob_bytes(self.blob)
             int remaining = blob_size - self.offset
-            char *buf
 
         if remaining <= 0:
             return b''
@@ -2633,12 +2594,7 @@ cdef class Blob(object):
         if length == 0:
             return b''
 
-        pybuf = PyBytes_FromStringAndSize(NULL, length)
-        buf = PyBytes_AS_STRING(pybuf)
-        if sqlite3_blob_read(self.blob, buf, length, self.offset):
-            self._close()
-            raise_sqlite_error(self.conn, 'error reading from blob: ')
-
+        pybuf = _blob_read(self, length, self.offset)
         self.offset += length
         return pybuf
 
@@ -2747,7 +2703,6 @@ cdef class Blob(object):
             int blob_size = sqlite3_blob_bytes(self.blob)
             int idx, start, stop, length
             bytes buf
-            char *p
 
         if isinstance(key, int):
             idx = key
@@ -2756,12 +2711,8 @@ cdef class Blob(object):
             if idx < 0 or idx >= blob_size:
                 raise IndexError('blob index out of range')
 
-            buf = PyBytes_FromStringAndSize(NULL, 1)
-            p = PyBytes_AS_STRING(buf)
-            if sqlite3_blob_read(self.blob, p, 1, idx):
-                self._close()
-                raise_sqlite_error(self.conn, 'error reading from blob: ')
-            return <unsigned char>p[0]
+            buf = _blob_read(self, 1, idx)
+            return <unsigned char>PyBytes_AS_STRING(buf)[0]
 
         if not isinstance(key, slice):
             raise TypeError('Blob.__getitem__ must be integer or slice')
@@ -2774,12 +2725,7 @@ cdef class Blob(object):
         if length <= 0:
             return b''
 
-        buf = PyBytes_FromStringAndSize(NULL, length)
-        p = PyBytes_AS_STRING(buf)
-        if sqlite3_blob_read(self.blob, p, length, start):
-            self._close()
-            raise_sqlite_error(self.conn, 'error reading from blob: ')
-        return buf
+        return _blob_read(self, length, start)
 
     def __setitem__(self, key, value):
         _check_blob(self)
@@ -3027,8 +2973,8 @@ cdef int cyClose(sqlite3_vtab_cursor *pBase) noexcept with gil:
 
 # Iterate once, advancing the cursor's index and assigning the row data to the
 # `row_data` field on the cysqlite_cursor struct.
-cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
-                    bint advance_idx) except -1:
+cdef int _store_row(cysqlite_cursor *pCur, object table_func,
+                    object raw) except -1:
     # Validate the shape of a row produced by iterate() and store it on the
     # cursor. Returns 1 on success, 0 if iteration stopped, and raises an exc
     # if there's a shape mismatch.
@@ -3060,8 +3006,7 @@ cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
             raise ValueError('iterate() must return (tuple of %s cols)'
                              % ncols)
         row = tmp
-        if advance_idx:
-            pCur.idx += 1
+        pCur.idx += 1
 
     Py_INCREF(row)
     pCur.row_data = <void *>row
@@ -3069,24 +3014,19 @@ cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
     return 1
 
 
-cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
-    cdef:
-        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
-        cysqlite_vtab *pVtab
-        object table_func
-        Connection conn
-        object raw
-
-    if pCur == NULL or pCur.table_func == NULL:
-        return SQLITE_ERROR
-
-    pVtab = <cysqlite_vtab *>pBase.pVtab
-    conn = _vtab_connection(pVtab)
-    table_func = <object>pCur.table_func
+# Pull the next row from the table function and store it on the cursor. Shared
+# by cyFilter (first row, after it resets idx) and cyNext.
+cdef int _vtab_advance(cysqlite_cursor *pCur, cysqlite_vtab *pVtab,
+                       Connection conn, object table_func) noexcept with gil:
+    cdef object raw
 
     if pCur.row_data != NULL:
         Py_DECREF(<tuple>pCur.row_data)
         pCur.row_data = NULL
+
+    # Every path below sets `stopped`, except a BaseException escaping this
+    # noexcept function. Keep the reset so that case behaves as it always has.
+    pCur.stopped = False
 
     try:
         raw = table_func.iterate(pCur.idx)
@@ -3100,7 +3040,7 @@ cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
         return SQLITE_ERROR
 
     try:
-        _store_row(pCur, table_func, raw, True)
+        _store_row(pCur, table_func, raw)
     except Exception as exc:
         _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
                           b'iterate() returned invalid row: ')
@@ -3108,6 +3048,19 @@ cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
         return SQLITE_ERROR
 
     return SQLITE_OK
+
+
+cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        cysqlite_vtab *pVtab
+
+    if pCur == NULL or pCur.table_func == NULL:
+        return SQLITE_ERROR
+
+    pVtab = <cysqlite_vtab *>pBase.pVtab
+    return _vtab_advance(pCur, pVtab, _vtab_connection(pVtab),
+                         <object>pCur.table_func)
 
 
 # Return the requested column from the current row.
@@ -3179,7 +3132,6 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
         Connection conn
         dict query = {}
         int idx
-        object raw
         tuple py_values
         list params
 
@@ -3224,31 +3176,7 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
         return SQLITE_ERROR
 
     # Get first row of data.
-    if pCur.row_data != NULL:
-        Py_DECREF(<tuple>pCur.row_data)
-        pCur.row_data = NULL
-
-    pCur.stopped = False
-    try:
-        raw = table_func.iterate(0)
-    except StopIteration:
-        pCur.stopped = True
-        return SQLITE_OK
-    except Exception as exc:
-        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
-                          b'iterate() raised: ')
-        pCur.stopped = True
-        return SQLITE_ERROR
-
-    try:
-        _store_row(pCur, table_func, raw, True)
-    except Exception as exc:
-        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
-                          b'iterate() returned invalid row: ')
-        pCur.stopped = True
-        return SQLITE_ERROR
-
-    return SQLITE_OK
+    return _vtab_advance(pCur, pVtab, conn, table_func)
 
 
 # SQLite will (in some cases, repeatedly) call the xBestIndex method to try and
@@ -3997,54 +3925,32 @@ def levenshtein_dist(a, b):
 
 
 cdef class median(object):
-    cdef:
-        int ct
-        list items
+    cdef list items
 
     def __init__(self):
-        self.ct = 0
         self.items = []
 
     def step(self, item):
-        if item is None:
-            return
-
-        cdef int lo = 0, hi = self.ct, mid
-        while lo < hi:
-            mid = (lo + hi) >> 1
-            if item < self.items[mid]:
-                hi = mid
-            else:
-                lo = mid + 1
-        self.items.insert(lo, item)
-        self.ct += 1
+        if item is not None:
+            insort(self.items, item)
 
     def inverse(self, item):
         if item is None:
             return
 
-        cdef int lo = 0, hi = self.ct, mid
-        while lo < hi:
-            mid = (lo + hi) >> 1
-            if self.items[mid] < item:
-                lo = mid + 1
-            else:
-                hi = mid
-        if lo >= self.ct or self.items[lo] != item:
+        cdef int idx = bisect_left(self.items, item)
+        if idx >= len(self.items) or self.items[idx] != item:
             raise ValueError(f'item {item} not found in median window')
-        del self.items[lo]
-        self.ct -= 1
+        del self.items[idx]
 
     def finalize(self):
-        if self.ct == 0:
+        cdef int n = len(self.items)
+        cdef int mid = n >> 1
+        if n == 0:
             return None
-        if self.ct == 1:
-            return self.items[0]
-        cdef int mid = self.ct >> 1
-        if self.ct & 1:
+        elif n & 1:
             return self.items[mid]
-        else:
-            return (self.items[mid - 1] + self.items[mid]) / 2.
+        return (self.items[mid - 1] + self.items[mid]) / 2.
 
     def value(self):
         return self.finalize()
