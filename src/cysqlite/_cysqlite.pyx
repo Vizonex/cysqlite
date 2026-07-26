@@ -3409,7 +3409,7 @@ class TableFunction(object):
         """
         Build a subclass of ``cls`` from a plain callable, without
         registering it on a connection. Connection.create_table_function()
-        is this plus register(); use this directly to register the same
+        is this plus register(). Use this directly to register the same
         function on more than one connection.
         """
         name = name or getattr(fn, '__name__', None)
@@ -3422,7 +3422,7 @@ class TableFunction(object):
                 f'{name}: columns must be passed or set on fn.columns')
 
         # Signature params become hidden SQL columns (in declaration order).
-        # A param without a default is required; one with a default is
+        # A param without a default is required. A param with a default is
         # optional. *args / **kwargs / positional-only params are not exposed
         # as params.
         sig_params, required = [], []

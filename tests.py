@@ -4562,7 +4562,7 @@ class TestCreateTableFunction(BaseTestCase):
                 yield (i,)
                 i += step
 
-        # Built without any connection; register on two independently.
+        # Building the class requires no connection.
         cls = TableFunction.from_function(series, columns=['value'])
         self.assertTrue(issubclass(cls, TableFunction))
         self.assertEqual((cls.name, cls.params), ('series',

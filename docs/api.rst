@@ -1490,8 +1490,8 @@ Connection
       Table functions are automatically re-registered if the connection is
       closed and re-opened.
 
-      To build the subclass without registering it -- e.g. to register the
-      same function on several connections -- use
+      To build the subclass without registering it, e.g. to register the
+      same function on several connections, use
       :meth:`TableFunction.from_function`.
 
    .. method:: table_function(name=None, columns=None, params=None)
@@ -2893,7 +2893,7 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
 
        Build a table function from a plain callable without registering it.
        :meth:`Connection.create_table_function` is this plus
-       :meth:`~TableFunction.register` -- see it for the full parameter
+       :meth:`~TableFunction.register`. See it for the full parameter
        semantics. Use ``from_function`` directly to register the same
        function on more than one connection.
 
