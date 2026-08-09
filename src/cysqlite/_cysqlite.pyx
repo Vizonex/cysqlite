@@ -3607,6 +3607,11 @@ HAS_LOAD_EXTENSION = bool(CYSQLITE_HAVE_LOAD_EXTENSION)
 #HAS_STMT_SCANSTATUS = compile_option('enable_stmt_scanstatus')
 
 
+def complete_statement(str sql):
+    cdef bytes bsql = encode(sql)
+    return bool(sqlite3_complete(bsql))
+
+
 def vfs_list():
     cdef:
         sqlite3_vfs *vfs = sqlite3_vfs_find(NULL)

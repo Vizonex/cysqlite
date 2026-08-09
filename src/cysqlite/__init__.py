@@ -5,6 +5,7 @@ from cysqlite._cysqlite import (
     Row,
     TableFunction,
     compile_option,
+    complete_statement,
     connect,
     damerau_levenshtein_dist,
     dict_factory,

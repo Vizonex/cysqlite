@@ -135,6 +135,18 @@ class TestModule(BaseTestCase):
         result = compile_option('this_option_does_not_exist')
         self.assertEqual(result, 0)
 
+    def test_complete_statement(self):
+        cases = (
+            ('select 1', False),
+            ('select 1;', True),
+            ('select;', True),
+            ('select * from;', True),
+            ('select * from t', False),
+            ('select * from t;', True),
+        )
+        for sql, expected in cases:
+            self.assertEqual(complete_statement(sql), expected, sql)
+
     def test_vfs_list(self):
         import cysqlite
         vfs_names = cysqlite.vfs_list()
