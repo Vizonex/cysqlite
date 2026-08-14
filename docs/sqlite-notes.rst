@@ -211,7 +211,7 @@ adapters and converters:
   column alias (``PARSE_COLNAMES``). cysqlite always matches against
   declared types, and has no column-alias mechanism.
 * ``sqlite3`` has a separate adaptation mechanism that checks for a
-  ``__conform__()`` method on the object being bound; the method's return
+  ``__conform__()`` method on the object being bound. The method's return
   value is used in place of the original. cysqlite has no equivalent -
   bind either a supported type directly, or register an adapter.
 * ``sqlite3`` historically shipped default adapters for ``datetime`` and
@@ -422,7 +422,7 @@ outermost level and a savepoint for nested calls:
                   (user_id, total))
        for item in line_items:
            db.execute('insert into order_items (...) values (...)', item)
-   # Commits on clean exit; rolls back if anything raised.
+   # Commits on clean exit, rolls back if anything raised.
 
 Atomic blocks nest **correctly**. A failure inside a nested block rolls back
 the savepoint without affecting the outer transaction:
