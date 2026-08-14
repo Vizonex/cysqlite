@@ -120,9 +120,8 @@ case-sensitive in cysqlite, case-insensitive in stdlib.
 Adapters and converters
 -----------------------
 
-stdlib registers globally; cysqlite registers per connection. There is
-no ``detect_types`` flag - converters always consult the declared
-column type.
+stdlib registers globally, while cysqlite registers per connection. There is
+no ``detect_types`` flag, converters always consult the declared column type.
 
 .. list-table::
    :header-rows: 1
@@ -147,7 +146,7 @@ column type.
 executescript
 -------------
 
-stdlib implicitly commits any open transaction first; cysqlite does
+stdlib implicitly commits any open transaction first while cysqlite does
 not. Wrap explicitly if you want script-as-atomic-unit.
 
 .. list-table::
@@ -270,7 +269,7 @@ Behaviors that change in your tests
   won't call them directly.
 * ``executescript`` runs inside any open transaction rather than
   implicitly committing. Wrap with ``atomic()`` if you want it atomic.
-* ``cysqlite.Row`` is case-sensitive on string lookup; stdlib's is
+* ``cysqlite.Row`` is case-sensitive on string lookup, stdlib's is
   case-insensitive.
 * Anywhere you parsed an ``IntegrityError`` message, catch the exact
   subclass instead.
@@ -279,8 +278,8 @@ What you gain
 -------------
 
 * :meth:`Connection.atomic` for nested transactions without manual savepoints.
-* Five ``IntegrityError`` and four ``OperationalError`` subclasses;
-  failing SQL embedded in error messages.
+* Five ``IntegrityError`` and four ``OperationalError`` subclasses.
+* Failing SQL embedded in error messages.
 * Built-in :func:`dict_factory`, :func:`rank_bm25`, :func:`rank_lucene`,
   :func:`levenshtein_dist`, :func:`damerau_levenshtein_dist`,
   :class:`median`.

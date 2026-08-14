@@ -12,7 +12,7 @@ def measure(db, name):
     s = time.perf_counter()
     yield
     e = time.perf_counter()
-    print('%0.2f - %s [%s]' % (e - s, name, db))
+    print('%0.3f - %s [%s]' % (e - s, name, db))
 
 def test_bind(db):
     params = [

@@ -2,6 +2,7 @@ import asyncio
 import ctypes
 import datetime
 import decimal
+import gc
 import glob
 import io
 import json
@@ -12,6 +13,7 @@ import threading
 import time
 import unittest
 import uuid
+import weakref
 from decimal import Decimal
 from fractions import Fraction
 
@@ -132,6 +134,18 @@ class TestModule(BaseTestCase):
 
         result = compile_option('this_option_does_not_exist')
         self.assertEqual(result, 0)
+
+    def test_complete_statement(self):
+        cases = (
+            ('select 1', False),
+            ('select 1;', True),
+            ('select;', True),
+            ('select * from;', True),
+            ('select * from t', False),
+            ('select * from t;', True),
+        )
+        for sql, expected in cases:
+            self.assertEqual(complete_statement(sql), expected, sql)
 
     def test_vfs_list(self):
         import cysqlite
@@ -2760,6 +2774,44 @@ class TestUserDefinedCallbacks(BaseTestCase):
         with self.assertRaises(IntegrityError):
             self.db.execute_simple("insert into u (k) values ('k1')")
 
+    def test_registrations_do_not_leak_connection(self):
+        # The callback wrappers reference the connection and are handed to
+        # SQLite. Because the connection owns them (SQLite only borrows the
+        # pointer), the reference cycle is visible to the GC and dropping an
+        # unclosed connection must still free it. Regression test: these all
+        # leaked when SQLite owned the only reference to the wrapper.
+        class Agg(object):
+            def step(self, v): pass
+            def inverse(self, v): pass
+            def value(self): return 0
+            def finalize(self): return 0
+
+        def tf(n):
+            for i in range(n):
+                yield (i,)
+
+        cases = [
+            (lambda c: c.create_function(lambda x: x, 'f', 1),
+             'select f(1)'),
+            (lambda c: c.create_aggregate(Agg, 'agg', 1),
+             'select agg(x) from (select 1 as x)'),
+            (lambda c: c.create_window_function(Agg, 'win', 1),
+             'select win(x) over () from (select 1 as x)'),
+            (lambda c: c.create_collation(lambda a, b: 0, 'coll'),
+             "select 'a' order by 1 collate coll"),
+            (lambda c: c.create_table_function(tf, 'tf', ['i']),
+             'select * from tf(2)'),
+        ]
+        for register, sql in cases:
+            conn = Connection(':memory:')
+            canary = conn.row_factory = lambda cursor, row: row
+            wr = weakref.ref(canary)
+            register(conn)
+            conn.execute(sql).fetchall()  # Exercise the registration.
+            del conn, canary
+            gc.collect()
+            self.assertIsNone(wr(), 'connection leaked by: %s' % sql)
+
 
 class TestDatabaseSettings(BaseTestCase):
     filename = ':memory:'
@@ -4514,6 +4566,32 @@ class TestCreateTableFunction(BaseTestCase):
             list(self.db.execute('select value from boom(5)'))
         self.assertIsInstance(cm.exception.__cause__, RuntimeError)
         self.assertEqual(str(cm.exception.__cause__), 'kaboom')
+
+    def test_from_function_registers_per_connection(self):
+        def series(start, stop, step=1):
+            i = start
+            while i < stop:
+                yield (i,)
+                i += step
+
+        # Building the class requires no connection.
+        cls = TableFunction.from_function(series, columns=['value'])
+        self.assertTrue(issubclass(cls, TableFunction))
+        self.assertEqual((cls.name, cls.params), ('series',
+                                                  ['start', 'stop', 'step']))
+
+        cls.register(self.db)
+        self.assertEqual(self.values('select value from series(0, 3)'),
+                         [0, 1, 2])
+
+        db2 = Connection(':memory:')
+        try:
+            cls.register(db2)
+            self.assertEqual(
+                [r for r, in db2.execute('select value from series(2, 5)')],
+                [2, 3, 4])
+        finally:
+            db2.close()
 
 
 class TestRankUDFs(BaseTestCase):

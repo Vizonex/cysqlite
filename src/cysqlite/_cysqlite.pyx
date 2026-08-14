@@ -23,7 +23,6 @@ from cpython.tuple cimport PyTuple_New
 from cpython.tuple cimport PyTuple_GET_SIZE
 from cpython.tuple cimport PyTuple_SET_ITEM
 from cpython.unicode cimport PyUnicode_AsUTF8
-from cpython.unicode cimport PyUnicode_AsUTF8String
 from cpython.unicode cimport PyUnicode_AsUTF8AndSize
 from cpython.unicode cimport PyUnicode_DecodeUTF8
 from cpython.unicode cimport PyUnicode_FromString
@@ -31,16 +30,10 @@ from libc.limits cimport INT_MAX
 from libc.math cimport log
 from libc.math cimport sqrt
 from libc.stdint cimport int64_t
-from libc.stdint cimport uint32_t
-from libc.stdint cimport uintptr_t
-from libc.stdlib cimport free
-from libc.stdlib cimport malloc
 from libc.stdlib cimport rand
 from libc.string cimport memcpy
 from libc.string cimport memset
 
-from collections import namedtuple
-from random import randint
 import datetime
 import functools
 import inspect
@@ -48,6 +41,8 @@ import io as _io
 import traceback
 import uuid
 import weakref
+from bisect import bisect_left
+from bisect import insort
 
 from cysqlite._cysqlite cimport *
 from cysqlite.exceptions import (
@@ -285,6 +280,7 @@ def dict_factory(Cursor cursor, tuple row):
     return {d[0]: v for d, v in zip(cursor.description, row)}
 
 
+@cython.final
 @cython.internal
 cdef class Statement(object):
     cdef:
@@ -378,7 +374,7 @@ cdef class Statement(object):
             Py_ssize_t nbytes
             Py_buffer view
             bint adapt = bool(self.conn.adapters)
-            int i = 1, rc = 0
+            int i, rc = 0
             int pc
             tuple tparams
 
@@ -618,14 +614,18 @@ cdef class Cursor(object):
 
         self.description = tuple(description)
 
-    cpdef execute(self, sql, params=None):
+    cdef int _start_execute(self) except -1:
         if self.conn.db == NULL:
             self.stmt = None
             self.executing = False
-            raise OperationalError('Database is closed.')
+            raise OperationalError('Cannot operate on closed database.')
 
         if self.executing:
             self.finish()
+        return 0
+
+    cpdef execute(self, sql, params=None):
+        self._start_execute()
 
         self.description = None
         self.row_converters = None
@@ -672,13 +672,7 @@ cdef class Cursor(object):
         return self
 
     cpdef executemany(self, sql, seq_of_params=None):
-        if self.conn.db == NULL:
-            self.stmt = None
-            self.executing = False
-            raise OperationalError('Database is closed.')
-
-        if self.executing:
-            self.finish()
+        self._start_execute()
 
         self.description = None
         self.row_converters = None
@@ -720,13 +714,7 @@ cdef class Cursor(object):
         return self
 
     cpdef executescript(self, sql):
-        if self.conn.db == NULL:
-            self.stmt = None
-            self.executing = False
-            raise OperationalError('Database is closed.')
-
-        if self.executing:
-            self.finish()
+        self._start_execute()
 
         cdef:
             sqlite3_stmt *st
@@ -780,7 +768,7 @@ cdef class Cursor(object):
     cdef tuple _get_current_row(self):
         if self.conn.db == NULL:
             self.executing = False
-            raise OperationalError('Database was closed.')
+            raise OperationalError('Cannot operate on closed database.')
         elif self.stmt and self.stmt.st == NULL:
             self.executing = False
             raise OperationalError('Statement was finalized.')
@@ -898,6 +886,7 @@ cdef class Connection(_callable_context_manager):
         dict converters  # SQLite decltype -> converter(value).
         dict adapters  # Python type -> adapter(value).
         dict registrations  # (name, nargs, kind) -> (kind, fn, name, nargs...)
+        dict callbacks  # (name, nargs, kind) -> wrapper; see _Callback.
         dict stmt_available  # sql -> Statement.
         object stmt_in_use  # In-use Statements, keyed by identity.
         object blob_in_use  # id(blob) -> Blob.
@@ -926,6 +915,7 @@ cdef class Connection(_callable_context_manager):
 
         self.db = NULL
         self.registrations = {}
+        self.callbacks = {}
         self.stmt_available = {}
         self.stmt_in_use = {}
         self.blob_in_use = weakref.WeakValueDictionary()
@@ -936,13 +926,18 @@ cdef class Connection(_callable_context_manager):
 
     def __dealloc__(self):
         if self.db:
-            sqlite3_trace_v2(self.db, 0, NULL, NULL)
-            sqlite3_commit_hook(self.db, NULL, NULL)
-            sqlite3_rollback_hook(self.db, NULL, NULL)
-            sqlite3_update_hook(self.db, NULL, NULL)
-            sqlite3_set_authorizer(self.db, NULL, NULL)
-            sqlite3_progress_handler(self.db, 0, NULL, NULL)
+            self._clear_hooks()
             sqlite3_close_v2(self.db)
+
+    cdef _clear_hooks(self):
+        # Unregistering is a no-op when nothing is registered, so these run
+        # unconditionally.
+        sqlite3_trace_v2(self.db, 0, NULL, NULL)
+        sqlite3_commit_hook(self.db, NULL, NULL)
+        sqlite3_rollback_hook(self.db, NULL, NULL)
+        sqlite3_update_hook(self.db, NULL, NULL)
+        sqlite3_set_authorizer(self.db, NULL, NULL)
+        sqlite3_progress_handler(self.db, 0, NULL, NULL)
 
     def finalize_statements(self):
         cdef Statement stmt
@@ -971,29 +966,11 @@ cdef class Connection(_callable_context_manager):
                 raise OperationalError('cannot close database while a '
                                        'transaction is open.')
 
-        if self._trace_hook is not None:
-            sqlite3_trace_v2(self.db, 0, NULL, NULL)
-            self._trace_hook = None
-
-        if self._commit_hook is not None:
-            sqlite3_commit_hook(self.db, NULL, NULL)
-            self._commit_hook = None
-
-        if self._rollback_hook is not None:
-            sqlite3_rollback_hook(self.db, NULL, NULL)
-            self._rollback_hook = None
-
-        if self._update_hook is not None:
-            sqlite3_update_hook(self.db, NULL, NULL)
-            self._update_hook = None
-
-        if self._auth_hook is not None:
-            sqlite3_set_authorizer(self.db, NULL, NULL)
-            self._auth_hook = None
-
-        if self._progress_hook is not None:
-            sqlite3_progress_handler(self.db, 0, NULL, NULL)
-            self._progress_hook = None
+        # Now that the hooks are unregistered SQLite cannot reach the wrappers,
+        # so our references can be dropped. See _Callback.
+        self._clear_hooks()
+        self._trace_hook = self._commit_hook = self._rollback_hook = None
+        self._update_hook = self._auth_hook = self._progress_hook = None
 
         # Close all blobs.
         for blob in list(self.blob_in_use.values()):
@@ -1007,15 +984,16 @@ cdef class Connection(_callable_context_manager):
         # Clear last error.
         self._callback_error = None
 
-        # UDFs, stored in `registrations`, are owned by SQLite so their
-        # xDestroy CB will free the refs. We retain the refs in order to replay
-        # them on re-connect.
-
         cdef int rc = sqlite3_close_v2(self.db)
         if rc != SQLITE_OK:
             raise InternalError(f'error closing database: {rc}')
 
         self.db = NULL
+
+        # The closed handle no longer references the UDF/table-function
+        # wrappers, so release them. `registrations` is retained in order to
+        # replay them on re-connect.
+        self.callbacks.clear()
         return True
 
     def connect(self):
@@ -1142,28 +1120,24 @@ cdef class Connection(_callable_context_manager):
     def cursor(self):
         return Cursor(self)
 
+    # The Cursor methods below check the connection is open, no need to here.
     def execute(self, sql, params=None):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.execute(sql, params)
 
     def executemany(self, sql, seq_of_params):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.executemany(sql, seq_of_params)
 
     def executescript(self, sql):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.executescript(sql)
 
     def execute_one(self, sql, params=None):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.execute(sql, params).fetchone()
 
     def execute_scalar(self, sql, params=None):
-        check_connection(self)
         cdef Cursor cursor = Cursor(self)
         return cursor.execute(sql, params).scalar()
 
@@ -1177,18 +1151,15 @@ cdef class Connection(_callable_context_manager):
             void *userdata = NULL
 
         if callback is not None:
-            Py_INCREF(ctx)
+            # sqlite3_exec is synchronous; the `ctx` local keeps the tuple
+            # alive for the duration of the call.
             userdata = <void *>ctx
 
-        try:
-            rc = sqlite3_exec(self.db, bsql, _exec_callback, userdata, &errmsg)
-            if rc != SQLITE_OK:
-                if errmsg != NULL:
-                    sqlite3_free(errmsg)
-                raise_sqlite_error(self, 'error executing query: ')
-        finally:
-            if callback is not None:
-                Py_DECREF(ctx)
+        rc = sqlite3_exec(self.db, bsql, _exec_callback, userdata, &errmsg)
+        if rc != SQLITE_OK:
+            if errmsg != NULL:
+                sqlite3_free(errmsg)
+            raise_sqlite_error(self, 'error executing query: ')
 
     cdef _execute_internal(self, sql):
         # Internal helper for executing BEGIN/COMMIT/ROLLBACK to avoid
@@ -1550,9 +1521,10 @@ cdef class Connection(_callable_context_manager):
             raise OperationalError(f'error loading extension: {msg}')
 
     cdef _register(self, kind, fn, name, nargs, deterministic):
-        # Register user-defined scalar/aggregate/window/collation, and hand
-        # ownership of the `_Callback` to SQLite. A fn of None removes the
-        # matching registration.
+        # Register a user-defined scalar/aggregate/window/collation; a fn of
+        # None removes the matching registration. The wrapper is owned by
+        # self.callbacks and only borrowed by SQLite -- the ownership model
+        # and the rules for dropping references are documented on _Callback.
         check_connection(self)
         cdef:
             _Callback callback
@@ -1568,24 +1540,27 @@ cdef class Connection(_callable_context_manager):
                 rc = sqlite3_create_collation_v2(
                     self.db, <const char *>bname, SQLITE_UTF8, NULL, NULL,
                     NULL)
-                self.registrations.pop((name, nargs, kind), None)
+                kinds = ('collation',)
             else:
                 # Scalar, aggregate and window functions share a registry, so
                 # an all-NULL registration removes whichever kind matches.
                 rc = sqlite3_create_function_v2(
                     self.db, bname, <int>nargs, flags, NULL, NULL, NULL, NULL,
                     NULL)
-                for k in ('function', 'aggregate', 'window'):
-                    self.registrations.pop((name, nargs, k), None)
+                kinds = ('function', 'aggregate', 'window')
             if rc != SQLITE_OK:
+                # E.g. SQLITE_BUSY when the function is in active use. SQLite
+                # kept the old registration, so keep our references too.
                 raise_sqlite_error(self, 'error removing %s: ' % kind)
+            for k in kinds:
+                self.registrations.pop((name, nargs, k), None)
+                self.callbacks.pop((name, nargs, k), None)
             return
 
         if deterministic:
             flags |= SQLITE_DETERMINISTIC
 
-        callback = _Callback.__new__(_Callback, self, fn)
-        Py_INCREF(callback)  # Matching decref in _free_cb.
+        callback = _Callback(self, fn)
 
         if kind == 'function':
             rc = sqlite3_create_function_v2(
@@ -1597,7 +1572,7 @@ cdef class Connection(_callable_context_manager):
                 _function_cb,
                 NULL,
                 NULL,
-                _free_cb)
+                NULL)
         elif kind == 'aggregate':
             rc = sqlite3_create_function_v2(
                 self.db,
@@ -1608,7 +1583,7 @@ cdef class Connection(_callable_context_manager):
                 NULL,
                 _step_cb,
                 _finalize_cb,
-                _free_cb)
+                NULL)
         elif kind == 'window':
             rc = sqlite3_create_window_function(
                 self.db,
@@ -1620,7 +1595,7 @@ cdef class Connection(_callable_context_manager):
                 _finalize_cb,
                 _value_cb,
                 _inverse_cb,
-                _free_cb)
+                NULL)
         elif kind == 'collation':
             rc = sqlite3_create_collation_v2(
                 self.db,
@@ -1628,15 +1603,14 @@ cdef class Connection(_callable_context_manager):
                 SQLITE_UTF8,
                 <void *>callback,
                 _collation_cb,
-                _free_cb)
+                NULL)
 
         if rc != SQLITE_OK:
-            # SQLite invokes xDestroy on failure for the function APIs, but
-            # explicitly does not for sqlite3_create_collation_v2.
-            if kind == 'collation':
-                Py_DECREF(callback)
             raise_sqlite_error(self, 'error creating %s: ' % kind)
 
+        # Success: SQLite released any wrapper this replaced, and ours is now
+        # the one it borrows (a failed registration must not reach here).
+        self.callbacks[(name, nargs, kind)] = callback
         self.registrations[(name, nargs, kind)] = (
             kind,
             fn,
@@ -1671,7 +1645,7 @@ cdef class Connection(_callable_context_manager):
 
     def create_table_function(self, fn, name=None, columns=None, params=None):
         check_connection(self)
-        cls = _build_table_function_class(fn, name, columns, params)
+        cls = TableFunction.from_function(fn, name, columns, params)
         cls.register(self)
         return cls
 
@@ -1685,6 +1659,9 @@ cdef class Connection(_callable_context_manager):
     cdef _register_table_function(self, table_function):
         cdef _TableFunctionImpl impl = _TableFunctionImpl(table_function, self)
         impl.create_module(self)
+        # The impl is owned here and only borrowed by SQLite, like every
+        # other callback wrapper (see _Callback).
+        self.callbacks[(impl.name, 0, 'tablefunc')] = impl
         self.registrations[(impl.name, 0, 'tablefunc')] = (
             'tablefunc', table_function, impl.name, 0, False)
 
@@ -1695,7 +1672,7 @@ cdef class Connection(_callable_context_manager):
             sqlite3_commit_hook(self.db, NULL, NULL)
             return
 
-        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        cdef _Callback callback = _Callback(self, fn)
         self._commit_hook = callback
         sqlite3_commit_hook(self.db, _commit_cb, <void *>callback)
 
@@ -1705,7 +1682,7 @@ cdef class Connection(_callable_context_manager):
             self._rollback_hook = None
             sqlite3_rollback_hook(self.db, NULL, NULL)
             return
-        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        cdef _Callback callback = _Callback(self, fn)
         self._rollback_hook = callback
         sqlite3_rollback_hook(self.db, _rollback_cb, <void *>callback)
 
@@ -1716,7 +1693,7 @@ cdef class Connection(_callable_context_manager):
             sqlite3_update_hook(self.db, NULL, NULL)
             return
 
-        cdef _Callback callback = _Callback.__new__(_Callback, self, fn)
+        cdef _Callback callback = _Callback(self, fn)
         self._update_hook = callback
         sqlite3_update_hook(self.db, _update_cb, <void *>callback)
 
@@ -1730,7 +1707,7 @@ cdef class Connection(_callable_context_manager):
             self._auth_hook = None
             rc = sqlite3_set_authorizer(self.db, NULL, NULL)
         else:
-            callback = _Callback.__new__(_Callback, self, fn)
+            callback = _Callback(self, fn)
             self._auth_hook = callback
             rc = sqlite3_set_authorizer(self.db, _auth_cb, <void *>callback)
 
@@ -1764,7 +1741,7 @@ cdef class Connection(_callable_context_manager):
             self._progress_hook = None
             sqlite3_progress_handler(self.db, 0, NULL, NULL)
         else:
-            callback = _Callback.__new__(_Callback, self, fn)
+            callback = _Callback(self, fn)
             self._progress_hook = callback
             sqlite3_progress_handler(self.db, n, _progress_cb,
                                      <void *>callback)
@@ -1923,6 +1900,23 @@ cdef class Connection(_callable_context_manager):
 
 
 cdef class _Callback(object):
+    # Wrapper handed to SQLite (as the user-data / context pointer) for every
+    # registered hook, UDF and collation; it references the Connection so
+    # callbacks can stash errors on it (_callback_error).
+    #
+    # Ownership model: the Connection owns every wrapper it hands to SQLite
+    # -- hooks via the _commit_hook/_trace_hook/... attributes, UDFs and
+    # collations via the `callbacks` dict (_TableFunctionImpl follows the
+    # same model). SQLite only *borrows* the pointer: nothing is INCREF'd on
+    # its behalf and no xDestroy destructor is registered. If SQLite owned
+    # the only reference, the conn <-> wrapper cycle would be invisible to
+    # the cyclic GC and an unclosed Connection could never be collected.
+    #
+    # Invariant: a wrapper reference may only be dropped (attribute cleared,
+    # dict entry popped or overwritten) once SQLite can no longer use the
+    # pointer: after a *successful* re-registration or removal (SQLite
+    # refuses both with SQLITE_BUSY while the object is in active use), or
+    # after sqlite3_close_v2() has succeeded.
     cdef:
         Connection conn
         object fn
@@ -1933,9 +1927,14 @@ cdef class _Callback(object):
         self.fn = fn
         self.settings = settings
 
-cdef void _free_cb(void *p) noexcept with gil:
-    if p != NULL:
-        Py_DECREF(<_Callback>p)
+
+cdef inline void _capture_exc(Connection conn, object exc) noexcept:
+    # Stash the exception on the connection so raise_sqlite_error can chain it
+    # as __cause__ on the error reported to the caller.
+    conn._callback_error = exc
+    if conn.print_callback_tracebacks:
+        traceback.print_exc()
+
 
 cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcept with gil:
     cdef:
@@ -1950,9 +1949,7 @@ cdef void _function_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noe
         result = cb.fn(*params)
         python_to_sqlite(ctx, result)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined function', -1)
 
 
@@ -1986,9 +1983,7 @@ cdef _AggregateWrapper get_aggregate(sqlite3_context *ctx):
     try:
         aggregate = cb.fn()  # Create aggregate instance.
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
         return
 
@@ -2014,9 +2009,7 @@ cdef void _step_cb(sqlite3_context *ctx, int argc, sqlite3_value **argv) noexcep
         params = sqlite_to_python(argc, argv)
         wrapper.aggregate.step(*params)
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
 
 
@@ -2032,9 +2025,7 @@ cdef void _finalize_cb(sqlite3_context *ctx) noexcept with gil:
         result = wrapper.aggregate.finalize()
         python_to_sqlite(ctx, result)
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined aggregate', -1)
 
     Py_DECREF(wrapper)  # Match incref.
@@ -2055,9 +2046,7 @@ cdef void _value_cb(sqlite3_context *ctx) noexcept with gil:
         result = wrapper.aggregate.value()
         python_to_sqlite(ctx, result)
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined window function', -1)
 
 
@@ -2073,9 +2062,7 @@ cdef void _inverse_cb(sqlite3_context *ctx, int argc, sqlite3_value **params) no
     try:
         wrapper.aggregate.inverse(*sqlite_to_python(argc, params))
     except Exception as exc:
-        wrapper.conn._callback_error = exc
-        if wrapper.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(wrapper.conn, exc)
         sqlite3_result_error(ctx, b'error in user-defined window function', -1)
 
 
@@ -2093,9 +2080,7 @@ cdef int _collation_cb(void *data, int n1, const void *data1,
     try:
         result = cb.fn(str1, str2)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         return 0
 
     if result > 0:
@@ -2115,9 +2100,7 @@ cdef int _commit_cb(void *data) noexcept with gil:
         if cb.fn():
             return SQLITE_ERROR
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -2130,9 +2113,7 @@ cdef void _rollback_cb(void *data) noexcept with gil:
     try:
         cb.fn()
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
 
 
 cdef void _update_cb(void *data, int queryType, const char *database,
@@ -2155,9 +2136,7 @@ cdef void _update_cb(void *data, int queryType, const char *database,
     try:
         cb.fn(query, decode(database), decode(table), <long long>rowid)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
 
 
 cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
@@ -2215,9 +2194,7 @@ cdef int _auth_cb(void *data, int op, const char *p1, const char *p2,
     try:
         rc = cb.fn(op, s1, s2, s3, s4)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         rc = SQLITE_ERROR
     return rc
 
@@ -2258,9 +2235,7 @@ cdef int _trace_cb(unsigned event, void *data, void *p, void *x) noexcept with g
     try:
         cb.fn(event, sid, sql, ns)
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         # NOTE: Sqlite ignores non-zero return values but this may change in
         # the future. Currently they advise returning 0.
         # return SQLITE_ERROR
@@ -2274,15 +2249,12 @@ cdef int _progress_cb(void *data) noexcept with gil:
     try:
         return 1 if cb.fn() else 0
     except Exception as exc:
-        cb.conn._callback_error = exc
-        if cb.conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(cb.conn, exc)
         return SQLITE_OK
 
 
 cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) noexcept with gil:
     cdef:
-        bytes bcol
         int i
         object callback
 
@@ -2296,9 +2268,7 @@ cdef int _exec_callback(void *data, int argc, char **argv, char **colnames) noex
     try:
         callback(row)
     except Exception as exc:
-        conn._callback_error = exc
-        if conn.print_callback_tracebacks:
-            traceback.print_exc()
+        _capture_exc(conn, exc)
         return SQLITE_ERROR
 
     return SQLITE_OK
@@ -2428,9 +2398,17 @@ cdef class Atomic(_callable_context_manager):
 cdef inline int _check_blob(Blob blob) except -1:
     if blob.blob == NULL:
         raise ValueError('Cannot operate on closed blob.')
-    if blob.conn.db == NULL:
-        raise OperationalError('Database closed.')
+    check_connection(blob.conn)
     return 0
+
+
+cdef inline bytes _blob_read(Blob blob, int length, int offset):
+    # A failed read closes the handle, leaving the blob unusable.
+    cdef bytes buf = PyBytes_FromStringAndSize(NULL, length)
+    if sqlite3_blob_read(blob.blob, PyBytes_AS_STRING(buf), length, offset):
+        blob._close()
+        raise_sqlite_error(blob.conn, 'error reading from blob: ')
+    return buf
 
 
 cdef class Blob(object):
@@ -2451,8 +2429,7 @@ cdef class Blob(object):
             int rc
             sqlite3_blob *blob
 
-        if conn.db == NULL:
-            raise OperationalError('cannot operate on closed database.')
+        check_connection(conn)
 
         self.conn = conn
         self._read_only = read_only
@@ -2558,11 +2535,8 @@ cdef class Blob(object):
         if limit == 0:
             return b''
 
-        chunk = PyBytes_FromStringAndSize(NULL, limit)
+        chunk = _blob_read(self, limit, self.offset)
         p = PyBytes_AS_STRING(chunk)
-        if sqlite3_blob_read(self.blob, p, limit, self.offset):
-            self._close()
-            raise_sqlite_error(self.conn, 'error reading from blob: ')
 
         n_read = limit
         for i in range(limit):
@@ -2606,7 +2580,6 @@ cdef class Blob(object):
             int length
             int blob_size = sqlite3_blob_bytes(self.blob)
             int remaining = blob_size - self.offset
-            char *buf
 
         if remaining <= 0:
             return b''
@@ -2621,12 +2594,7 @@ cdef class Blob(object):
         if length == 0:
             return b''
 
-        pybuf = PyBytes_FromStringAndSize(NULL, length)
-        buf = PyBytes_AS_STRING(pybuf)
-        if sqlite3_blob_read(self.blob, buf, length, self.offset):
-            self._close()
-            raise_sqlite_error(self.conn, 'error reading from blob: ')
-
+        pybuf = _blob_read(self, length, self.offset)
         self.offset += length
         return pybuf
 
@@ -2735,7 +2703,6 @@ cdef class Blob(object):
             int blob_size = sqlite3_blob_bytes(self.blob)
             int idx, start, stop, length
             bytes buf
-            char *p
 
         if isinstance(key, int):
             idx = key
@@ -2744,12 +2711,8 @@ cdef class Blob(object):
             if idx < 0 or idx >= blob_size:
                 raise IndexError('blob index out of range')
 
-            buf = PyBytes_FromStringAndSize(NULL, 1)
-            p = PyBytes_AS_STRING(buf)
-            if sqlite3_blob_read(self.blob, p, 1, idx):
-                self._close()
-                raise_sqlite_error(self.conn, 'error reading from blob: ')
-            return <unsigned char>p[0]
+            buf = _blob_read(self, 1, idx)
+            return <unsigned char>PyBytes_AS_STRING(buf)[0]
 
         if not isinstance(key, slice):
             raise TypeError('Blob.__getitem__ must be integer or slice')
@@ -2762,12 +2725,7 @@ cdef class Blob(object):
         if length <= 0:
             return b''
 
-        buf = PyBytes_FromStringAndSize(NULL, length)
-        p = PyBytes_AS_STRING(buf)
-        if sqlite3_blob_read(self.blob, p, length, start):
-            self._close()
-            raise_sqlite_error(self.conn, 'error reading from blob: ')
-        return buf
+        return _blob_read(self, length, start)
 
     def __setitem__(self, key, value):
         _check_blob(self)
@@ -2833,8 +2791,10 @@ _io.RawIOBase.register(Blob)
 
 # The cysqlite_vtab struct embeds the base sqlite3_vtab struct, and adds a
 # field to store a reference to the Python implementation and a borrowed ptr to
-# the parent Connection. The module (and the _TableFunctionImpl that owns the
-# connection ref) outlives every vtab created from it.
+# the parent Connection. The vtab holds its own reference on the
+# TableFunction subclass (INCREF in cyConnect, DECREF in cyDisconnect); the
+# conn ptr is only dereferenced from callbacks that run during statement
+# execution, which requires a live Connection.
 ctypedef struct cysqlite_vtab:
     sqlite3_vtab base
     void *table_func_cls
@@ -2860,9 +2820,9 @@ cdef void set_vtab_error(sqlite3_vtab *pVtab, const char *msg) noexcept:
 
 
 cdef inline Connection _vtab_connection(cysqlite_vtab *pVtab):
-    # Return the owning Conn from a vtab. The Connection is held alive via the
-    # _TableFunctionImpl, whose lifetime is bound to the module registration on
-    # the conn, so the ptr is either valid or NULL.
+    # Return the owning Conn from a vtab. Callers only run while a statement
+    # is executing on the connection, so the borrowed ptr is either valid or
+    # NULL.
     if pVtab == NULL or pVtab.conn == NULL:
         return None
     return <Connection>pVtab.conn
@@ -3013,8 +2973,8 @@ cdef int cyClose(sqlite3_vtab_cursor *pBase) noexcept with gil:
 
 # Iterate once, advancing the cursor's index and assigning the row data to the
 # `row_data` field on the cysqlite_cursor struct.
-cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
-                    bint advance_idx) except -1:
+cdef int _store_row(cysqlite_cursor *pCur, object table_func,
+                    object raw) except -1:
     # Validate the shape of a row produced by iterate() and store it on the
     # cursor. Returns 1 on success, 0 if iteration stopped, and raises an exc
     # if there's a shape mismatch.
@@ -3024,7 +2984,7 @@ cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
         tuple row
         tuple tmp
         int ncols = table_func._ncols
-        bint with_rowid = getattr(type(table_func), 'with_rowid', False)
+        bint with_rowid = table_func.with_rowid
 
     if raw is None:
         pCur.stopped = True
@@ -3046,8 +3006,7 @@ cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
             raise ValueError('iterate() must return (tuple of %s cols)'
                              % ncols)
         row = tmp
-        if advance_idx:
-            pCur.idx += 1
+        pCur.idx += 1
 
     Py_INCREF(row)
     pCur.row_data = <void *>row
@@ -3055,24 +3014,19 @@ cdef int _store_row(cysqlite_cursor *pCur, object table_func, object raw,
     return 1
 
 
-cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
-    cdef:
-        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
-        cysqlite_vtab *pVtab
-        object table_func
-        Connection conn
-        object raw
-
-    if pCur == NULL or pCur.table_func == NULL:
-        return SQLITE_ERROR
-
-    pVtab = <cysqlite_vtab *>pBase.pVtab
-    conn = _vtab_connection(pVtab)
-    table_func = <object>pCur.table_func
+# Pull the next row from the table function and store it on the cursor. Shared
+# by cyFilter (first row, after it resets idx) and cyNext.
+cdef int _vtab_advance(cysqlite_cursor *pCur, cysqlite_vtab *pVtab,
+                       Connection conn, object table_func) noexcept with gil:
+    cdef object raw
 
     if pCur.row_data != NULL:
         Py_DECREF(<tuple>pCur.row_data)
         pCur.row_data = NULL
+
+    # Every path below sets `stopped`, except a BaseException escaping this
+    # noexcept function. Keep the reset so that case behaves as it always has.
+    pCur.stopped = False
 
     try:
         raw = table_func.iterate(pCur.idx)
@@ -3086,7 +3040,7 @@ cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
         return SQLITE_ERROR
 
     try:
-        _store_row(pCur, table_func, raw, True)
+        _store_row(pCur, table_func, raw)
     except Exception as exc:
         _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
                           b'iterate() returned invalid row: ')
@@ -3094,6 +3048,19 @@ cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
         return SQLITE_ERROR
 
     return SQLITE_OK
+
+
+cdef int cyNext(sqlite3_vtab_cursor *pBase) noexcept with gil:
+    cdef:
+        cysqlite_cursor *pCur = <cysqlite_cursor *>pBase
+        cysqlite_vtab *pVtab
+
+    if pCur == NULL or pCur.table_func == NULL:
+        return SQLITE_ERROR
+
+    pVtab = <cysqlite_vtab *>pBase.pVtab
+    return _vtab_advance(pCur, pVtab, _vtab_connection(pVtab),
+                         <object>pCur.table_func)
 
 
 # Return the requested column from the current row.
@@ -3165,7 +3132,6 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
         Connection conn
         dict query = {}
         int idx
-        object raw
         tuple py_values
         list params
 
@@ -3210,31 +3176,7 @@ cdef int cyFilter(sqlite3_vtab_cursor *pBase, int idxNum,
         return SQLITE_ERROR
 
     # Get first row of data.
-    if pCur.row_data != NULL:
-        Py_DECREF(<tuple>pCur.row_data)
-        pCur.row_data = NULL
-
-    pCur.stopped = False
-    try:
-        raw = table_func.iterate(0)
-    except StopIteration:
-        pCur.stopped = True
-        return SQLITE_OK
-    except Exception as exc:
-        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
-                          b'iterate() raised: ')
-        pCur.stopped = True
-        return SQLITE_ERROR
-
-    try:
-        _store_row(pCur, table_func, raw, True)
-    except Exception as exc:
-        _vtab_capture_exc(<sqlite3_vtab *>pVtab, conn, type(table_func), exc,
-                          b'iterate() returned invalid row: ')
-        pCur.stopped = True
-        return SQLITE_ERROR
-
-    return SQLITE_OK
+    return _vtab_advance(pCur, pVtab, conn, table_func)
 
 
 # SQLite will (in some cases, repeatedly) call the xBestIndex method to try and
@@ -3366,13 +3308,32 @@ cdef int cyUpdate(sqlite3_vtab *pBase, int argc, sqlite3_value **argv,
     return SQLITE_OK
 
 
-cdef void cyDestroy(void *pAux) noexcept with gil:
-    Py_DECREF(<_TableFunctionImpl>pAux)
+# All table functions share one static module definition: the function
+# pointers are identical for every registration, and per-function state (the
+# TableFunction subclass and owning connection) travels through the pAux
+# pointer given to sqlite3_create_module_v2(). A C global also guarantees the
+# struct outlives every registration that refers to it -- SQLite dereferences
+# it as late as connection teardown (clearing eponymous vtabs). Members not
+# assigned below (xCreate, xBegin, xRename, ...) stay NULL from static
+# initialization; xCreate in particular must remain NULL so the function can
+# be invoked eponymously.
+cdef sqlite3_module _tablefunc_module
+_tablefunc_module.iVersion = 0
+_tablefunc_module.xConnect = cyConnect
+_tablefunc_module.xBestIndex = cyBestIndex
+_tablefunc_module.xDisconnect = cyDisconnect
+_tablefunc_module.xOpen = cyOpen
+_tablefunc_module.xClose = cyClose
+_tablefunc_module.xFilter = cyFilter
+_tablefunc_module.xNext = cyNext
+_tablefunc_module.xEof = cyEof
+_tablefunc_module.xColumn = cyColumn
+_tablefunc_module.xRowid = cyRowid
+_tablefunc_module.xUpdate = cyUpdate
 
 
 cdef class _TableFunctionImpl(object):
     cdef:
-        sqlite3_module module
         object table_function
         Connection conn
         unicode name  # Resolved during class-construction.
@@ -3387,41 +3348,18 @@ cdef class _TableFunctionImpl(object):
 
         cdef:
             bytes name = encode(self.name)
-            sqlite3 *db = conn.db
             int rc
 
-        # Populate the SQLite module struct members.
-        self.module.iVersion = 0
-        self.module.xCreate = NULL
-        self.module.xConnect = cyConnect
-        self.module.xBestIndex = cyBestIndex
-        self.module.xDisconnect = cyDisconnect
-        self.module.xDestroy = NULL
-        self.module.xOpen = cyOpen
-        self.module.xClose = cyClose
-        self.module.xFilter = cyFilter
-        self.module.xNext = cyNext
-        self.module.xEof = cyEof
-        self.module.xColumn = cyColumn
-        self.module.xRowid = cyRowid
-        self.module.xUpdate = cyUpdate
-        self.module.xBegin = NULL
-        self.module.xSync = NULL
-        self.module.xCommit = NULL
-        self.module.xRollback = NULL
-        self.module.xFindFunction = NULL
-        self.module.xRename = NULL
-
-        # Increment refcount before handing ptr to SQLite.
-        Py_INCREF(self)
+        # No destructor: the impl is owned by the connection's `callbacks`
+        # dict (see _Callback) and outlives the module registration that
+        # borrows it.
         rc = sqlite3_create_module_v2(
-            db,
+            conn.db,
             <const char *>name,
-            &self.module,
+            &_tablefunc_module,
             <void *>self,
-            cyDestroy)
+            NULL)
         if rc != SQLITE_OK:
-            Py_DECREF(self)
             raise_sqlite_error(
                 conn,
                 'failed to register table function %s: ' % self.name)
@@ -3465,6 +3403,55 @@ class TableFunction(object):
 
         # Stored in conn.registrations so it is replayed on reconnect.
         conn._register_table_function(cls)
+
+    @classmethod
+    def from_function(cls, fn, name=None, columns=None, params=None):
+        """
+        Build a subclass of ``cls`` from a plain callable, without
+        registering it on a connection. Connection.create_table_function()
+        is this plus register(). Use this directly to register the same
+        function on more than one connection.
+        """
+        name = name or getattr(fn, '__name__', None)
+        if not name:
+            raise ProgrammingError('table function requires a name')
+        if columns is None:
+            columns = getattr(fn, 'columns', None)
+        if columns is None:
+            raise ProgrammingError(
+                f'{name}: columns must be passed or set on fn.columns')
+
+        # Signature params become hidden SQL columns (in declaration order).
+        # A param without a default is required. A param with a default is
+        # optional. *args / **kwargs / positional-only params are not exposed
+        # as params.
+        sig_params, required = [], []
+        for p in inspect.signature(fn).parameters.values():
+            if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
+                sig_params.append(p.name)
+                if p.default is inspect.Parameter.empty:
+                    required.append(p.name)
+        if params is None:
+            params = sig_params
+            req = frozenset(required)
+        else:
+            req = frozenset(p for p in required if p in params)
+
+        def initialize(self, **filters):
+            self._iter = iter(fn(**filters))    # defaults fill unbound params
+
+        def iterate(self, idx):
+            row = next(self._iter)              # StopIteration -> end of table
+            return tuple(row) if type(row) is list else row
+
+        return type(str(name), (cls,), {
+            'columns': list(columns),
+            'params': list(params),
+            'name': name,
+            '_required_params': req,
+            'initialize': initialize,
+            'iterate': iterate,
+        })
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -3558,48 +3545,6 @@ class TableFunction(object):
         return ', '.join(accum)
 
 
-def _build_table_function_class(fn, name=None, columns=None, params=None):
-    name = name or getattr(fn, '__name__', None)
-    if not name:
-        raise ProgrammingError('create_table_function: a name is required')
-    if columns is None:
-        columns = getattr(fn, 'columns', None)
-    if columns is None:
-        raise ProgrammingError(
-            f'{name}: columns must be passed or set on fn.columns')
-
-    # Signature params become hidden SQL columns (in declaration order). A param
-    # without a default is required; one with a default is optional. *args /
-    # **kwargs / positional-only params are not exposed as params.
-    sig_params, required = [], []
-    for p in inspect.signature(fn).parameters.values():
-        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
-            sig_params.append(p.name)
-            if p.default is inspect.Parameter.empty:
-                required.append(p.name)
-    if params is None:
-        params = sig_params
-        req = frozenset(required)
-    else:
-        req = frozenset(p for p in required if p in params)
-
-    def initialize(self, **filters):
-        self._iter = iter(fn(**filters))        # defaults fill unbound params
-
-    def iterate(self, idx):
-        row = next(self._iter)                  # StopIteration -> end of table
-        return tuple(row) if type(row) is list else row
-
-    return type(str(name), (TableFunction,), {
-        'columns': list(columns),
-        'params': list(params),
-        'name': name,
-        '_required_params': req,
-        'initialize': initialize,
-        'iterate': iterate,
-    })
-
-
 sqlite_version = decode(sqlite3_version)
 sqlite_version_info = tuple(int(i) if i.isdigit() else i
                             for i in sqlite_version.split('.'))
@@ -3660,6 +3605,11 @@ HAS_COLUMN_METADATA = compile_option('enable_column_metadata')
 HAS_LOAD_EXTENSION = bool(CYSQLITE_HAVE_LOAD_EXTENSION)
 #HAS_PREUPDATE_HOOK = compile_option('enable_preupdate_hook')
 #HAS_STMT_SCANSTATUS = compile_option('enable_stmt_scanstatus')
+
+
+def complete_statement(str sql):
+    cdef bytes bsql = encode(sql)
+    return bool(sqlite3_complete(bsql))
 
 
 def vfs_list():
@@ -3980,54 +3930,32 @@ def levenshtein_dist(a, b):
 
 
 cdef class median(object):
-    cdef:
-        int ct
-        list items
+    cdef list items
 
     def __init__(self):
-        self.ct = 0
         self.items = []
 
     def step(self, item):
-        if item is None:
-            return
-
-        cdef int lo = 0, hi = self.ct, mid
-        while lo < hi:
-            mid = (lo + hi) >> 1
-            if item < self.items[mid]:
-                hi = mid
-            else:
-                lo = mid + 1
-        self.items.insert(lo, item)
-        self.ct += 1
+        if item is not None:
+            insort(self.items, item)
 
     def inverse(self, item):
         if item is None:
             return
 
-        cdef int lo = 0, hi = self.ct, mid
-        while lo < hi:
-            mid = (lo + hi) >> 1
-            if self.items[mid] < item:
-                lo = mid + 1
-            else:
-                hi = mid
-        if lo >= self.ct or self.items[lo] != item:
+        cdef int idx = bisect_left(self.items, item)
+        if idx >= len(self.items) or self.items[idx] != item:
             raise ValueError(f'item {item} not found in median window')
-        del self.items[lo]
-        self.ct -= 1
+        del self.items[idx]
 
     def finalize(self):
-        if self.ct == 0:
+        cdef int n = len(self.items)
+        cdef int mid = n >> 1
+        if n == 0:
             return None
-        if self.ct == 1:
-            return self.items[0]
-        cdef int mid = self.ct >> 1
-        if self.ct & 1:
+        elif n & 1:
             return self.items[mid]
-        else:
-            return (self.items[mid - 1] + self.items[mid]) / 2.
+        return (self.items[mid - 1] + self.items[mid]) / 2.
 
     def value(self):
         return self.finalize()
