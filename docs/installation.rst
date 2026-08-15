@@ -134,10 +134,22 @@ SQLite Multiple Ciphers
 -----------------------
 
 `SQLite3 Multiple Ciphers <https://utelle.github.io/SQLite3MultipleCiphers/>`_
-also provides encryption, and publishes amalgamations on its
-`releases page <https://github.com/utelle/SQLite3MultipleCiphers/releases>`_.
-Extract the two amalgamation files and rename them into the root of the
-cysqlite checkout:
+also provides encryption, with no external crypto dependency. The
+``fetch_sqlite3mc`` script downloads a release amalgamation and renames it
+into place:
+
+.. code-block:: shell
+
+    git clone https://github.com/coleifer/cysqlite
+    cd cysqlite/
+
+    ./scripts/fetch_sqlite3mc         # Latest release, or:
+    ./scripts/fetch_sqlite3mc v2.5.0  # A specific tag.
+
+    pip install .
+
+Or do the same by hand with a zip from the
+`releases page <https://github.com/utelle/SQLite3MultipleCiphers/releases>`_:
 
 .. code-block:: shell
 
@@ -145,12 +157,11 @@ cysqlite checkout:
     mv sqlite3mc_amalgamation.c cysqlite/sqlite3.c
     mv sqlite3mc_amalgamation.h cysqlite/sqlite3.h
 
-    cd cysqlite/
-    pip install .
+Older amalgamation zips also contain the original SQLite ``sqlite3.c`` and
+``sqlite3.h``. Those are not the files to use.
 
 The build announces ``cysqlite: building with bundled sqlite3.c
-(sqlite3mc)``. Older amalgamation zips also contain the original SQLite
-``sqlite3.c`` and ``sqlite3.h``. Those are not the files to use. Verify:
+(sqlite3mc)``. Verify:
 
 .. code-block:: python
 
