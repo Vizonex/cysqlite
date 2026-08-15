@@ -4,3 +4,8 @@ src/cysqlite/*.c
 z.py
 build/
 .eggs/
+/sqlite3.c
+/sqlite3.h
+/sqlite3ext.h
+/sqlite3mc_amalgamation.*
+scripts/sqlcipher/
