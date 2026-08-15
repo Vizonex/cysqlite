@@ -13,7 +13,9 @@ author = 'charles leifer'
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
-extensions = []
+extensions = ['sphinx.ext.intersphinx']
+
+intersphinx_mapping = {'python': ('https://docs.python.org/3', None)}
 
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
@@ -24,7 +26,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_theme = 'alabaster'
-html_static_path = ['_static']
+html_static_path = []
 html_theme_options = {
     'github_user': 'coleifer',
     'github_repo': 'cysqlite',

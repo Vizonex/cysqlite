@@ -280,8 +280,8 @@ things before you call ``commit()``, which finally releases the lock.
 to detect if a statement is data-modifying, which triggers the silent ``BEGIN``.
 Even in Python 3.14, if the statement starts with ``INSERT``, ``UPDATE``, ``DELETE``,
 or ``REPLACE``, the driver automatically begins a transaction before executing
-it. This misses things like queries beginning with a comment or queries using
-CTEs, among other interesting failure modes.
+it. This misses things like queries using CTEs, among other interesting
+failure modes.
 
 .. note::
    There was a moment in the Python 3.6 days where this was going to be fixed by

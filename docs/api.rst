@@ -103,6 +103,49 @@ Module
      Connections cannot be shared by threads.
    * 3 = Connections may be shared by threads, no restrictions.
 
+.. function:: compile_option(opt)
+
+   :param str opt: option name, e.g. ``'ENABLE_FTS5'``.
+   :rtype: bool
+
+   Return whether the given option was defined when the SQLite library was
+   compiled. The ``SQLITE_`` prefix may be omitted and matching is
+   case-insensitive.
+
+.. function:: complete_statement(sql)
+
+   :param str sql: SQL string.
+   :rtype: bool
+
+   Return whether the string appears to contain one or more complete SQL
+   statements. Like the stdlib helper of the same name, useful for building
+   interactive shells.
+
+.. function:: vfs_list()
+
+   :rtype: list
+
+   Return the names of the registered `VFS <https://www.sqlite.org/vfs.html>`_
+   implementations, the default VFS first.
+
+.. data:: apilevel
+
+   The string ``'2.0'``, required by the DB-API 2.0.
+
+.. data:: paramstyle
+
+   The string ``'qmark'``, required by the DB-API 2.0.
+
+.. data:: Binary
+
+   Alias for :class:`memoryview`, required by the DB-API 2.0 for wrapping
+   binary values.
+
+.. data:: version
+.. data:: version_info
+
+   Version of cysqlite itself, as a string and as a tuple of integers.
+
 
 Connection
 ----------
@@ -517,7 +560,7 @@ Connection
       :param params: parameters for query (optional).
       :type params: tuple, list, sequence, dict, or ``None``.
       :return: first row or ``None`` if no results.
-      :rtype: tuple, :class:`~cysqlite.Row`, or ``None``
+      :rtype: tuple, :class:`Row`, or ``None``
 
       Example:
 
@@ -2004,6 +2047,34 @@ Connection
          print(f'Data version: {version}')
 
 
+Schema metadata
+---------------
+
+Namedtuples returned by the introspection methods, defined in
+``cysqlite.metadata``.
+
+.. class:: Column(name, data_type, null, primary_key, table, default)
+
+   Returned by :meth:`Connection.get_columns`.
+
+.. class:: Index(name, sql, columns, unique, table)
+
+   Returned by :meth:`Connection.get_indexes`.
+
+.. class:: ForeignKey(column, dest_table, dest_column, table)
+
+   Returned by :meth:`Connection.get_foreign_keys`.
+
+.. class:: View(name, sql)
+
+   Returned by :meth:`Connection.get_views`.
+
+.. class:: ColumnMetadata(table, column, datatype, collation, not_null, \
+                          primary_key, auto_increment)
+
+   Returned by :meth:`Connection.table_column_metadata`.
+
+
 Cursor
 ------
 
@@ -2817,16 +2888,17 @@ Example :class:`TableFunction` that supports INSERT/UPDATE/DELETE queries:
       *Optional* - specify the name for the table function. If not provided,
       name will be taken from the class name.
 
-   .. attribute:: with_rowid = False
+   .. attribute:: with_rowid
 
-      *Optional* - specify rowid for each row returned. Rows returned by the
-      ``iterate()`` method must be of form ``(rowid, (row, data, ...))``.
+      *Optional*, default ``False`` - specify rowid for each row returned.
+      Rows returned by the ``iterate()`` method must be of form
+      ``(rowid, (row, data, ...))``.
 
-   .. attribute:: print_tracebacks = False
+   .. attribute:: print_tracebacks
 
-      When ``True``, print a full traceback for any errors that occur in the
-      table-function's callback methods. When ``False`` (the default), only the
-      generic :class:`OperationalError` is visible.
+      *Optional*, default ``False`` - when ``True``, print a full traceback
+      for any errors that occur in the table-function's callback methods.
+      When ``False``, only the generic :class:`OperationalError` is visible.
 
    .. method:: initialize(**parameter_values)
 

@@ -271,6 +271,10 @@ Behaviors that change in your tests
   implicitly committing. Wrap with ``atomic()`` if you want it atomic.
 * ``cysqlite.Row`` is case-sensitive on string lookup, stdlib's is
   case-insensitive.
+* ``autocommit`` is a method here, not the settable attribute stdlib 3.12
+  added. ``if db.autocommit:`` is always true because it references the
+  bound method, call it as ``db.autocommit()``.
+  :attr:`~Connection.in_transaction` is a property in both.
 * Anywhere you parsed an ``IntegrityError`` message, catch the exact
   subclass instead.
 
