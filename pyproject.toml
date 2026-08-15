@@ -25,8 +25,13 @@ packages = ["cysqlite"]
 package-dir = {"" = "src"}
 include-package-data = true
 
+# Wheels carry only the compiled extensions, type stubs and python modules.
+# The cython/C sources still reach the sdist via MANIFEST.in.
 [tool.setuptools.package-data]
-cysqlite = ["*.pxd", "*.pxi", "*.c", "*.pyi", "py.typed"]
+cysqlite = ["*.pyi", "py.typed"]
+
+[tool.setuptools.exclude-package-data]
+cysqlite = ["*.c", "*.pyx", "*.pxd", "*.pxi"]
 
 [tool.setuptools.dynamic]
 version = { attr = "cysqlite.__version__" }
