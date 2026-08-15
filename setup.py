@@ -1,6 +1,5 @@
 import os
 import sys
-import warnings
 
 from setuptools import setup
 from setuptools.extension import Extension
@@ -59,19 +58,60 @@ def _have_load_extension():
 
 link_args = []
 
-# Determine how we are building cysqlite.
-sqlite_source = None
-is_sqlite_mc = False
+# Determine how we are building cysqlite. A sqlite3.c/sqlite3.h pair in the
+# project root is compiled in, otherwise we link against the system sqlite3.
+if os.path.exists('sqlite3mc_amalgamation.c') or \
+   os.path.exists('sqlite3mc_amalgamation.h'):
+    raise SystemExit('cysqlite: rename sqlite3mc_amalgamation.c and '
+                     'sqlite3mc_amalgamation.h to sqlite3.c and sqlite3.h, '
+                     'then rebuild.')
 
-if os.path.exists('sqlite3.c') and os.path.exists('sqlite3.h'):
-    sqlite_source = 'sqlite3.c'
-elif os.path.exists('sqlite3mc_amalgamation.c') and \
-     os.path.exists('sqlite3mc_amalgamation.h'):
-    sqlite_source = 'sqlite3mc_amalgamation.c'
-    is_sqlite_mc = True
+have_src = os.path.exists('sqlite3.c')
+have_hdr = os.path.exists('sqlite3.h')
+if have_src != have_hdr:
+    raise SystemExit('cysqlite: embedded builds require both sqlite3.c and '
+                     'sqlite3.h, only %s is present.'
+                     % ('sqlite3.c' if have_src else 'sqlite3.h'))
 
-if sqlite_source:
-    sources.append(sqlite_source)
+
+def _amalgamation_flavor():
+    """
+    Classify sqlite3.c by content: sqlite3mc, sqlcipher or plain sqlite.
+    sqlite3mc also contains sqlcipher compatibility strings, so test it first.
+    """
+    with open('sqlite3.c', 'rb') as fh:
+        data = fh.read()
+    if b'sqlite3mc' in data:
+        return 'sqlite3mc'
+    elif b'sqlcipher' in data:
+        return 'sqlcipher'
+    return 'sqlite'
+
+
+use_sqlcipher = False
+
+if have_src:
+    flavor = _amalgamation_flavor()
+    override = os.environ.get('SQLCIPHER')
+    if override is None:
+        use_sqlcipher = flavor == 'sqlcipher'
+    elif override.strip().lower() in ('0', 'false', 'no', ''):
+        use_sqlcipher = False
+    elif flavor == 'sqlcipher':
+        use_sqlcipher = True
+    else:
+        raise SystemExit('cysqlite: SQLCIPHER was requested but sqlite3.c '
+                         'is %s.' % flavor)
+
+    if flavor == 'sqlcipher' and not use_sqlcipher:
+        note = ' (sqlcipher, codec disabled)'
+    elif flavor != 'sqlite':
+        note = ' (%s)' % flavor
+    else:
+        note = ''
+    print('cysqlite: building with bundled sqlite3.c%s' % note)
+
+    sources.append('sqlite3.c')
     include_dirs = ['.']
     libraries = []
     define_macros = [
@@ -94,7 +134,7 @@ if sqlite_source:
         ('inline', '__inline'),
     ]
 
-    if os.environ.get('SQLCIPHER'):
+    if use_sqlcipher:
         define_macros.extend([
             ('SQLITE_HAS_CODEC', '1'),
             ('SQLITE_SECURE_DELETE', '1'),
@@ -110,18 +150,13 @@ if sqlite_source:
                 'USER32.LIB', 'libcrypto.lib'])
         else:
             link_args.extend(['-lcrypto'])
-    elif os.environ.get('SQLITEMC') or is_sqlite_mc:
-        define_macros.extend([
-            ('SQLITE_SECURE_DELETE', '1'),
-            ('SQLITE_TEMP_STORE', '2'),
-            ('SQLITE_THREADSAFE', '1'),
-        ])
     else:
         define_macros.extend([
             ('SQLITE_TEMP_STORE', 3),
         ])
 
 else:
+    print('cysqlite: building against system sqlite3')
     include_dirs = []
     libraries = ['sqlite3']
     define_macros = [
