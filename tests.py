@@ -156,6 +156,9 @@ class TestModule(BaseTestCase):
 
 class TestConnection(BaseTestCase):
     def assertDB(self, filename, expected):
+        # SQLite reports the resolved path, e.g. /private/tmp on macos.
+        if expected:
+            expected = os.path.realpath(expected)
         conn = Connection(filename)
         with conn:
             row = conn.execute_one('pragma database_list;')
@@ -2945,7 +2948,7 @@ class TestDatabaseSettings(BaseTestCase):
 
         self.assertEqual(self.db.database_list(), [
             ('main', ''),
-            ('addl', '/tmp/cysqlite.db')])
+            ('addl', os.path.realpath('/tmp/cysqlite.db'))])
 
     @unittest.skipUnless(HAS_LOAD_EXTENSION,
                          'SQLite built without load-extension support')
