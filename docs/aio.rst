@@ -55,7 +55,7 @@ Example pool usage:
                await db.execute('insert into ...')
                await asyncio.sleep(0)
 
-   async def task_a(pool):
+   async def task_b(pool):
        async with pool.writer() as db:
            async with db.atomic() as tx:
                await db.execute('insert into ...')
@@ -67,13 +67,13 @@ Module
 .. function:: connect(database, **kwargs)
 
    Open an :class:`AsyncConnection` to the database. Arbitrary keyword
-   arguments are passed to the underlying synchronous :func:`cysqlite.connect`.
+   arguments are passed to the underlying synchronous ``cysqlite.connect()``.
 
    Must be called from within a running asyncio event loop.
 
    :param database: database filename or ``':memory:'``.
    :type database: str, ``pathlib.Path``
-   :param kwargs: passed to :func:`cysqlite.connect`, e.g. ``timeout``, ``pragmas``.
+   :param kwargs: passed to ``cysqlite.connect()``, e.g. ``timeout``, ``pragmas``.
    :return: async connection wrapping a synchronous :class:`Connection`.
    :rtype: :class:`AsyncConnection`
 
