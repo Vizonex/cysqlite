@@ -109,10 +109,6 @@ def series(start, stop, step=1):
         i += step
 
 list(db.execute('select value from series(0, 10, 2)'))  # [(0,), (2,), (4,), (6,), (8,)]
-
-# Veto a COMMIT from Python (a truthy return turns it into a ROLLBACK).
-readonly = True
-db.commit_hook(lambda: readonly)
 ```
 
 See the [user-defined functions guide](https://cysqlite.readthedocs.io/en/latest/functions.html)

@@ -20,9 +20,8 @@ Wheels
     pip install cysqlite
 
 Wheels embed the SQLite release current at the time the cysqlite release was
-made, compiled with FTS3/FTS4/FTS5, JSON, R*Tree, STAT4, math functions,
-soundex, update/delete limit, load-extension support and
-``SQLITE_MAX_VARIABLE_NUMBER=250000``. Check any build with
+made, compiled with full-text search, JSON, r*tree, stat4, math functions,
+soundex, update/delete limit, and extension support. Check any build with
 :func:`compile_option`:
 
 .. code-block:: python
@@ -156,9 +155,6 @@ Or do the same by hand with a zip from the
     unzip sqlite3mc-*-amalgamation.zip 'sqlite3mc_amalgamation.*'
     mv sqlite3mc_amalgamation.c cysqlite/sqlite3.c
     mv sqlite3mc_amalgamation.h cysqlite/sqlite3.h
-
-Older amalgamation zips also contain the original SQLite ``sqlite3.c`` and
-``sqlite3.h``. Those are not the files to use.
 
 The build announces ``cysqlite: building with bundled sqlite3.c
 (sqlite3mc)``. Verify:
